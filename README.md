@@ -1,44 +1,58 @@
 # CF-HybridRec
 
-CF-HybridRec 是一个基于协同过滤的混合菜谱推荐算法项目。它基于 dietrecommendation 增强版 SQLite 数据库（160 张原始表 + 合成用户/行为数据），实现了"User-CF + Item-CF + SVD 矩阵分解 + Content-Based 特征交互"四模块动态融合的混合推荐流程，完全使用数据库原生表头特征，不引入外部特征。
+CF-HybridRec 是一个基于协同过滤的混合菜谱推荐算法项目。它基于 dietrecommendation 增强版 SQLite 数据库（187 张表），实现了"User-CF + Item-CF + SVD 矩阵分解 + Two-Tower 双塔模型"四模块动态融合的混合推荐流程，完全使用数据库原生表头特征，不引入外部特征。
 
 当前项目已经支持：
 
-- 用户四维画像构建（人口统计 + 口味偏好 + 地域 + 职业）
+- 用户五维画像构建（人口统计 + 口味偏好 + 地域 + 职业 + 年龄）
 - 菜谱七维特征工程（菜系 / GI·时长·成本数值 / 食材口味聚合 / 食性聚合 / 营养成分 / 食材类型 TF-IDF / 烹饪方式 MultiHot）
-- User-Based CF（皮尔逊评分相似度 + 余弦画像相似度混合）
-- Item-Based CF（调整余弦共现相似度 + 余弦内容相似度混合）
+- User-Based CF（评分相似度 + 画像相似度自适应融合）
+- Item-Based CF（共现相似度 + 内容相似度自适应融合）
 - SVD 矩阵分解（SGD 优化，菜谱因子用内容特征初始化）
-- Content-Based 特征交互模型（$\hat{R}_{ui} = \mu + w_u^T U_u + w_v^T V_i + U_u^T M V_i$，M 低秩分解）
+- Two-Tower 双塔模型（$R̂_{ui}=μ+w_u^T U_u+w_v^T V_i+(A^T U_u)^T(B^T V_i)$，用户塔 + 物品塔）
 - 动态置信度自适应融合权重
 - 离线评估体系（RMSE / MAE / Precision@K / Recall@K / NDCG@K / Coverage）
-- 合成数据一键运行（无需真实数据库即可完整复现）
+- 新用户数据一键生成（1000 个多样化用户 + 差异化交互行为）
 
 完整算法设计见：[cf_algorithm_design.md](cf_algorithm_design.md)。
 
-数据库审计报告见：[database_audit_report.md](database_audit_report.md)。
-
 ## 1. 数据边界
 
-实验默认读取：
+### 1.1 原始数据库
+
+默认读取（旧数据库）：
 
 ```text
 C:\Users\HHP\Desktop\数据库v1(1)\数据库v1\dietrecommendation_original_schema_enhanced.sqlite
 ```
 
-该数据库包含：
+含 500 合成用户，交互稠密度约 0.72%，`user` 表有效特征仅 21 维（性别+年龄组+口味，职业/地域数据为空）。
 
-- 原始 160 张 dietrecommendation 业务表（992,663 行原始数据，全部保留）
-- 新增合成数据：500 用户、5,500 口味偏好、23,776 浏览行为、5,497 菜谱喜好、3,267 菜谱规避、777 做菜记录等
-- 补充数据：2,449 新食材、9,628 菜谱食材外键补全、35,994 食材营养、24,540 菜谱营养估算、6,360 食材味型派生
+### 1.2 增强数据库（通过脚本生成）
+
+运行 `generate_new_users.py` 生成：
+
+```text
+C:\Users\HHP\Desktop\数据库v1(1)\数据库v1\dietrecommendation_v2_enhanced.sqlite
+```
+
+| 指标 | 原始库 | 增强库 |
+|------|--------|--------|
+| 用户数 | 506 | **1506** |
+| 用户特征维度 d_u | 21 | **128**（职业+地域已填充） |
+| 交互稠密度 | 0.72% | **19.9%** |
+| 总交互数 | 1.5 万 | **122 万** |
+| 喜好标记 | 0.55 万 | **62 万** |
+| 实际做菜 | 777 | **31.8 万** |
+
+生成逻辑：8 种用户原型（嗜辣青年/养生老年/精致主妇/健身青年/甜食女生/嗜辣女生/传统中老/美食探索者）× 口味偏移变体，每种原型有独立的食材偏好、菜系偏好、交互行为模式。职业/出生地/工作地从数据库原生 `occupation`/`address` 表填充。
 
 需要注意：
 
-- 合成用户 ID 范围：1000001–1000500，来自 `synthetic_users_v1`，只能用于模拟实验
-- 菜谱营养成分多数为估算值，不是实验测定数据
-- `comment` 表没有 rating 字段，Demo 使用行为→评分映射（做菜=5 / 喜好=3+intensity×0.4 / 浏览=2.5 / 规避=1）
-- 数据库有疾病知识表，但当前算法未使用疾病维度
-- 食材口味和食性来自 `ingredient2taste` / `ingredient2nature` 的派生数据
+- 原始合成用户 ID 范围：1000001–1000500
+- 新增用户 ID 范围：1001001–1002000
+- Demo 使用行为→评分映射做菜=5 / 喜好=3+intensity×0.4 / 浏览=2.5 / 规避=1
+- `ingredient2nature` 表无数据，菜谱食性特征在当前版本中不能发挥效果
 
 ## 2. 算法总体思路
 
@@ -47,7 +61,7 @@ C:\Users\HHP\Desktop\数据库v1(1)\数据库v1\dietrecommendation_original_sche
 推荐流程如下：
 
 ```text
-SQLite 数据库 (160 tables)
+SQLite 数据库 (187 tables)
   → 读取 user / usertaste / recipe / recipeingredient / ingredient /
          cookstep / recipecomposite / useracutalrecipe / userfondnessrecipe /
          useravoidrecipe / userbrowse 等 16 张表
@@ -55,26 +69,26 @@ SQLite 数据库 (160 tables)
   → 构建评分矩阵 R (m × n)
   → 训练/测试时间切分 (8:2)
   → 四模块并行计算:
-      ├─ User-CF:  KNN 邻居加权预测
-      ├─ Item-CF:  KNN 邻居加权预测
-      ├─ SVD:      SGD 矩阵分解
-      └─ Content:  带交互矩阵 M 的线性模型
+      ├─ User-CF:     KNN 邻居加权预测
+      ├─ Item-CF:     KNN 邻居加权预测
+      ├─ SVD:         SGD 矩阵分解
+      └─ Two-Tower:   双塔模型（用户塔⊗物品塔交互 + 线性偏置）
   → 动态置信度融合:
-      w_k(c_u, c_i) — 交互密度高时提 SVD 权重，稀疏时提 Content 权重
+      w_k(c_u, c_i) — 交互密度高时提 SVD 权重，稀疏时提 Two-Tower 权重
   → 返回 Top-K 推荐列表
 ```
 
 融合公式：
 
 ```
-R̂_final = w₁ · R̂_UBCF + w₂ · R̂_IBCF + w₃ · R̂_SVD + w₄ · R̂_Content
+R̂_final = w₁·R̂_UBCF + w₂·R̂_IBCF + w₃·R̂_SVD + w₄·R̂_TwoTower
 
 其中 wₖ 通过网格搜索 + 置信度自适应确定：
 wₖ'(c_u, c_i) = wₖ_base · φₖ(c_u, c_i)
 φ₁ = c_u·(1-c_i) + 0.5    (UserCF 在用户密集、菜谱稀疏时权重高)
 φ₂ = (1-c_u)·c_i + 0.5    (ItemCF 在用户稀疏、菜谱密集时权重高)
 φ₃ = c_u·c_i + 0.3         (SVD 在两者都密集时权重高)
-φ₄ = (1-c_u)·(1-c_i) + 0.3 (Content 在两者都稀疏时兜底)
+φ₄ = (1-c_u)·(1-c_i) + 0.3 (Two-Tower 在两者都稀疏时兜底)
 ```
 
 ## 3. 主要使用的数据表与特征映射
@@ -85,22 +99,22 @@ wₖ'(c_u, c_i) = wₖ_base · φₖ(c_u, c_i)
 |--------|------|-----------|----------|
 | 性别 | 3 | `user.gender` | OneHot {男, 女, 未知} |
 | 年龄组 | 7 | `user.birthday` → 推算 | OneHot {婴儿, 幼儿, 儿童, 少年, 青年, 老年, 未知} |
-| 职业 | ≤15 | `user.occupation` | OneHot |
-| 口味偏好 | 11 | `usertaste.taste` → `taste.name`, `usertaste.level` | 归一化 [-1, 1] |
-| 出生地 | ≤36 | `user.birthplace` → `address.id` | OneHot |
-| 工作地 | ≤36 | `user.workplace` → `address.id` | OneHot |
+| 职业 | 7 | `user.occupation` → `occupation.id` | OneHot |
+| 口味偏好 | 11 | `usertaste.taste` → `taste.name`, `usertaste.level` | 归一化 [0, 1] |
+| 出生地 | ≤50 | `user.birthplace` → `address.id` | OneHot |
+| 工作地 | ≤50 | `user.workplace` → `address.id` | OneHot |
 
-### 3.2 菜谱特征向量 V（7 组，d_v = 14+3+11+5+5+N_ft+N_cm）
+### 3.2 菜谱特征向量 V（7 组，d_v = 14+3+11+10+5+1076+26）
 
 | 特征组 | 维度 | 来源表.字段链路 | 编码方式 |
 |--------|------|---------------|----------|
 | 菜系 | 14 | `recipe.cuisine` → `cuisine.id` | OneHot |
 | 数值特征 | 3 | `recipe.gi`, `recipe.timeconsumming`, `recipe.cost` | 归一化 |
 | 口味聚合 | 11 | `recipeingredient` → `ingredient` → `ingredient2taste` → `taste` | 食材口味分布均值 |
-| 食性聚合 | 5 | `recipeingredient` → `ingredient` → `ingredient2nature` → `nature` | 食材食性分布均值 |
+| 食性聚合 | 10 | `recipeingredient` → `ingredient` → `ingredient2nature` → `nature` | 食材食性分布均值 |
 | 营养成分 | 5 | `recipecomposite` → `composition` → `content` | 归一化 |
-| 食材类型 | N_ft | `recipeingredient` → `ingredient.foodtype` → `foodtype` | TF-IDF |
-| 烹饪方式 | N_cm | `cookstep.cookmethod` → `cookmethod` | MultiHot |
+| 食材类型 | 1076 | `recipeingredient` → `ingredient.foodtype` → `foodtype` | TF-IDF |
+| 烹饪方式 | 26 | `cookstep.cookmethod` → `cookmethod` | MultiHot |
 
 ### 3.3 交互信号表（构建评分矩阵 R）
 
@@ -115,11 +129,11 @@ wₖ'(c_u, c_i) = wₖ_base · φₖ(c_u, c_i)
 
 | 表名 | 用途 |
 |------|------|
-| `taste` | 口味字典（甘/辛/酸/苦/咸/涩/淡 等 11 种） |
-| `cuisine` | 菜系字典（鲁/川/粤/苏/闽/浙/湘/徽/家常菜 等 14 种） |
-| `foodtype` | 食材类型字典（蔬菜/水果/肉类/水产 等） |
-| `nature` | 食性字典（寒/凉/平/温/热） |
-| `cookmethod` | 烹饪方式字典（炒/煮/蒸/炖/炸/烤/煎/拌 等） |
+| `taste` | 口味字典（甘/辛/酸/苦/咸/涩/淡/微辛/微酸/微苦/微咸 共 11 种） |
+| `cuisine` | 菜系字典（鲁/川/粤/苏/闽/浙/湘/徽 等 14 种） |
+| `foodtype` | 食材类型字典（蔬菜/水果/肉类/水产 等 1076 种） |
+| `nature` | 食性字典（寒/凉/平/温/热/微寒/微凉/微温/大热/有毒 共 10 种） |
+| `cookmethod` | 烹饪方式字典（炒/煮/蒸/炖/炸/烤/煎/拌 等 26 种） |
 
 ## 4. 安装
 
@@ -137,19 +151,9 @@ pip install numpy pandas scikit-learn --break-system-packages
 python -c "import numpy; import pandas; import sklearn; print('numpy:', numpy.__version__); print('pandas:', pandas.__version__); print('sklearn:', sklearn.__version__)"
 ```
 
-## 5. 快速开始（合成数据 / 真实数据）
+## 5. 快速开始
 
-### 5.1 使用合成数据运行
-
-不需要数据库文件，代码自动生成 200 用户 × 500 菜谱的模拟数据：
-
-```bash
-python cf_demo.py
-```
-
-### 5.2 使用增强版 SQLite 数据库运行
-
-需要 `dietrecommendation_original_schema_enhanced.sqlite` 在指定路径：
+### 5.1 使用增强版 SQLite 数据库运行
 
 ```bash
 python cf_demo_v2.py
@@ -158,33 +162,32 @@ python cf_demo_v2.py
 输出包括：
 
 - 数据加载统计（每张表的行数和使用的字段）
-- 特征工程详情（U/V 的维度和来源）
+- 特征工程详情（U 和 V 的维度和来源）
 - 四模块训练进度
 - 离线评估指标（RMSE / MAE / Precision@20 / Recall@20 / NDCG@20 / Coverage）
-- 3 个合成用户的 Top-10 推荐示例
+- Top-10 推荐示例
 
-### 5.3 想用自己的测试用户验证
+修改 `cf_demo_v2.py` 第 28 行的 `DB_PATH` 可切换数据库：
 
-在 SQLite 数据库中直接插入你的测试用户和交互记录：
-
-```sql
-sqlite3 "path/to/dietrecommendation_original_schema_enhanced.sqlite"
-
--- 新建测试用户
-INSERT INTO user (id, name, gender, birthday, occupation, birthplace, workplace, username, password, enabled)
-VALUES (9999, '测试用户', '男', '1995-06-15', 9, 1, 1, 'test', '123', 1);
-
--- 设置口味偏好
-INSERT INTO usertaste (id, name, user, taste, level)
-VALUES (90001, 't1', 9999, 2, 5), (90002, 't2', 9999, 5, 4);
-
--- 添加交互记录
-INSERT INTO useracutalrecipe (id, name, user, recipe) VALUES (80001, 'a1', 9999, 100);
-INSERT INTO userfondnessrecipe (id, name, user, recipe, intensity) VALUES (70001, 'f1', 9999, 200, 4);
-INSERT INTO useravoidrecipe (id, name, user, recipe, intensity) VALUES (60001, 'v1', 9999, 300, 5);
-
-.exit
+```python
+DB_PATH = r"C:\Users\HHP\Desktop\数据库v1(1)\数据库v1\dietrecommendation_v2_enhanced.sqlite"
 ```
+
+### 5.2 生成新用户数据
+
+```bash
+python generate_new_users.py
+```
+
+生成 1000 个多样化用户（8 种原型 × 口味变体），交互行为包含明显差异化模式（偏辣/偏淡/偏甜/偏荤/偏素等），并填充职业、出生地、工作地字段。
+
+### 5.3 查看用户交互详情
+
+```bash
+python check_user_ids.py
+```
+
+查看指定用户的实际交互记录（做过/喜好/规避/浏览明细），用于验证数据生成质量或排查推荐问题。
 
 ## 6. 实验评估
 
@@ -205,7 +208,15 @@ NDCG@20         : 归一化折损累计增益（考虑排序位置）
 Coverage        : 推荐覆盖的不同菜谱比例
 ```
 
-### 6.2 消融实验（手动切换验证各模块贡献）
+### 6.2 原始数据库 vs 增强数据库评估对比
+
+| 指标 | 原始库（500 用户，0.72%） | 增强库（1500 用户，19.9%） |
+|------|--------------------------|---------------------------|
+| SVD RMSE | 1.05 | **0.43** |
+| 用户间推荐区分度 | 差（Top-10 趋同） | 待测试 |
+| Coverage | 1.2% | 待测试 |
+
+### 6.3 消融实验
 
 编辑 `cf_demo_v2.py` 的 main() 函数，注释掉对应模块：
 
@@ -213,65 +224,54 @@ Coverage        : 推荐覆盖的不同菜谱比例
 # 仅 User-CF
 R_final = R_ubcf
 
-# 仅 Item-CF
-R_final = R_ibcf
-
 # 仅 SVD
 R_final = R_svd
 
-# 仅 Content
-R_final = R_content
+# 仅 Two-Tower
+R_final = R_tt
 
 # 混合（默认）
 R_final = hf.predict_all(...)
 ```
 
-比较各组合的指标差异，定位瓶颈模块。
-
-### 6.3 调参建议
+### 6.4 调参建议
 
 | 参数 | 默认值 | 搜索范围 | 说明 |
 |------|--------|---------|------|
 | K (UBCF 邻居) | 50 | {20, 30, 50, 80, 100} | 越大推荐越趋向热门 |
 | K (IBCF 邻居) | 30 | {10, 20, 30, 50} | 同上 |
 | k (SVD 因子) | 30 | {20, 50, 100} | 越大拟合越强但越慢 |
-| SVD epochs | 40 | {20, 40, 60, 100} | 观察 RMSE 收敛 |
-| Content latent_dim | 8 | {8, 16, 32} | 越大交互矩阵越丰富 |
+| SVD epochs | 40 | {20, 40, 60} | 观察 RMSE 收敛 |
+| Two-Tower latent_dim | 32 | {8, 16, 32, 64} | 越大交互矩阵越丰富 |
 | γ_u, γ_i | 0.1 | {0.05, 0.1, 0.2} | 置信度衰减速率 |
 
 ## 7. 项目结构
 
 ```text
-D:\科研实习\数据库\
-  cf_demo.py                  # v1: 合成数据版（可独立运行，无需数据库）
-  cf_demo_v2.py               # v2: 真实数据版（读取增强 SQLite）
-  cf_algorithm_design.md      # 完整算法设计文档（数学公式 + 流程图）
-  database_audit_report.md    # 160 张表审计报告
-  archive_import_analysis.md  # Archive CSV 数据导入分析
-  import_guide.md             # CSV → MySQL 导入步骤指南
-  setup_staging.sql           # 临时表创建脚本
-  transform_to_target.sql     # 数据转换脚本
-  preprocess_csv.py           # CSV 预处理工具
-  export_ingr_map.py          # ingr_map.pkl 导出工具
-  explore_db.py               # 数据库结构探索工具
-  README.md                   # 本文件
+D:\科研实习\代码\
+  cf_demo_v2.py               # 主程序：四模块混合推荐
+  generate_new_users.py        # 新用户数据生成脚本
+  check_user_ids.py            # 用户交互详情查看工具
+  explore_schema.py            # 数据库结构探索工具
+  cf_algorithm_design.md       # 完整算法设计文档
+  README.md                    # 本文件
 ```
 
 ## 8. 已知局限与后续方向
 
 ### 8.1 已知局限
 
-- **Popularity Bias**：浏览信号占交互 71%，Item-CF 和 SVD 天然偏向热门菜谱，导致 Top-N 推荐在不同用户间趋同
-- **无真实 rating**：`comment` 表没有评分字段，当前使用行为→评分映射，精度有限
-- **Content-Based 偏弱**：latent_dim=8 的交互矩阵参数量较少，对长尾菜谱的个性化能力不足
-- **合成数据限制**：用户是合成的，无法反映真实用户行为的分布
-- **冷启动**：新用户无交互时退化为 Content 模块，但 Content 模块训练样本少（做菜仅 777 条）
+- **ingredient2nature 表无数据**：菜谱食性特征 (nature_dim=10) 始终为均匀分布，当前不发挥作用
+- **无真实 rating**：`comment` 表没有评分字段，使用行为→评分映射，精度有限
+- **Two-Tower 收敛较慢**：在 122 万训练集上需要较多 epoch 才能稳定，已通过预计算 UA/VB 加速
+- **合成数据仍非真实行为**：即使增强了多样性，合成数据的分布规律仍不能完全模拟真实用户
+- **HybridFusion 网格搜索较慢**：三层 for 循环遍历 125 种权重组合，在大数据集上耗时
 
 ### 8.2 后续改进方向
 
-- 引入 BPR (Bayesian Personalized Ranking) 替代伪评分矩阵，直接用隐式反馈（成对排序）训练
+- 引入 BPR (Bayesian Personalized Ranking) 替代伪评分矩阵，直接用隐式反馈训练
 - 增加 MMR (Maximal Marginal Relevance) 多样性重排，缓解 popularity bias
-- Content 模块升级为双塔 DNN 或加入 LLM 语义 embedding（菜谱名 + 描述文本向量）
+- Two-Tower 升级为双塔 DNN 或加入 LLM 语义 embedding
 - 引入时间衰减因子，近期交互权重更高
 - 规则层过滤接入 `hcirecommendrecipe`、`seasonrecommendingrecipe`、`sportrecommendrecipe` 等表
-- 接入真实 rating 字段（在 `comment` 表新增 `rating` 列）
+- 使用 PyTorch 重写 SVD 和 Two-Tower 训练部分，支持 GPU 加速
