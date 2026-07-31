@@ -1,16 +1,19 @@
 """
 基于协同过滤的混合菜谱推荐算法 Demo v2 — GPU 加速版
 ===================================================
-与 cf_demo_v2.py 算法逻辑完全一致，仅将 NumPy 替换为 CuPy。
+与 cf_demo_v2.py 算法逻辑一致，但将 CPU 版中的 Python 逐元素循环
+全部向量化为 GPU 矩阵运算：
+  - UserCF/ItemCF: 相似度融合循环 → 矩阵乘法; 预测循环 → 按物品/用户批量向量化
+  - SVD/TwoTower:  逐样本 SGD → mini-batch SGD
+  - HybridFusion:  网格搜索逐样本 → 整批矩阵误差计算
 自动检测 GPU，无 GPU 时回退到 NumPy。
 
-依赖：pip install cupy-cuda12x numpy pandas scikit-learn --break-system-packages
-（根据 CUDA 版本调整：cupy-cuda11x / cupy-cuda12x）
-
+依赖：pip install cupy-cuda11x numpy pandas scikit-learn --break-system-packages
 用法：python cf_demo_v2_gpu.py
 """
 
 import sqlite3
+import numpy as np
 import pandas as pd
 from datetime import datetime
 from collections import defaultdict
@@ -21,17 +24,32 @@ warnings.filterwarnings('ignore')
 try:
     import cupy as cp
     _HAS_CUDA = True
-    # 确认实际可用
-    _ = cp.zeros(1)
-    print(f"[GPU] CuPy {cp.__version__} 已加载，设备: {cp.cuda.runtime.getDeviceProperties(0)['name'].decode()}")
+    _ = cp.zeros(1)  # 确认实际可用
+    print(f"[GPU] CuPy {cp.__version__} 已加载，设备: "
+          f"{cp.cuda.runtime.getDeviceProperties(0)['name'].decode()}")
 except Exception as e:
-    import numpy as cp
+    cp = np
     _HAS_CUDA = False
     print(f"[GPU] CuPy 不可用 ({e})，回退到 NumPy CPU 模式")
 
-xp = cp  # 统一使用 xp，后续所有数组操作都用 xp.xxx
+xp = cp  # 统一数组操作接口
 
-# ─── 数据库路径 ──────────────────────────────────────────
+
+def _to_cpu(x):
+    """GPU→CPU；非 GPU 环境原样返回"""
+    if _HAS_CUDA and isinstance(x, cp.ndarray):
+        return cp.asnumpy(x)
+    return x
+
+
+def _to_gpu(x):
+    """CPU→GPU；非 GPU 环境原样返回"""
+    if _HAS_CUDA and not isinstance(x, cp.ndarray):
+        return cp.asarray(x)
+    return x
+
+
+# ─── 数据库路径（部署时改成服务器上的路径） ──────────────
 DB_PATH = r"C:\Users\HHP\Desktop\数据库v1(1)\数据库v1\dietrecommendation_v2_enhanced.sqlite"
 
 
@@ -49,12 +67,9 @@ def cosine_similarity_gpu(X):
 
 def truncated_svd_gpu(X, n_components, random_state=42):
     """GPU 版 TruncatedSVD，返回降维后的矩阵 (n_rows, n_components)"""
-    rs = xp.random.RandomState(random_state)
-    # 随机初始化
     n, d = X.shape
     k = min(n_components, d, n)
-    # 使用随机 SVD: 先随机投影再 QR + SVD
-    # 比直接做全 SVD 快很多
+    rs = xp.random.RandomState(random_state)
     Q, _ = xp.linalg.qr(xp.random.randn(d, k))
     for _ in range(3):  # 幂迭代提升精度
         Q, _ = xp.linalg.qr(X.T @ (X @ Q))
@@ -74,97 +89,72 @@ def load_data_from_db():
     print("  从 SQLite 数据库加载数据")
     print("=" * 70)
 
-    # ── 1. user 表 ──
     df_user = pd.read_sql_query("""
         SELECT id, name, gender, birthday, occupation, birthplace, workplace
-        FROM user
-        WHERE id > 0
+        FROM user WHERE id > 0
     """, conn)
     print(f"\n  [user]           {len(df_user):>6} 行  "
           f"使用: id, gender, birthday, occupation, birthplace, workplace")
 
-    # ── 2. usertaste 表 ──
     df_usertaste = pd.read_sql_query("""
         SELECT ut.user, ut.taste, t.name AS taste_name, ut.level
-        FROM usertaste ut
-        JOIN taste t ON t.id = ut.taste
-        WHERE ut.user > 0
+        FROM usertaste ut JOIN taste t ON t.id = ut.taste WHERE ut.user > 0
     """, conn)
     print(f"  [usertaste]      {len(df_usertaste):>6} 行  "
           f"使用: user, taste→taste.name, level")
 
-    # ── 3. taste 表 (字典) ──
     df_taste = pd.read_sql_query("SELECT id, name FROM taste WHERE id > 0", conn)
     taste_list = df_taste['name'].tolist()
     print(f"  [taste]          {len(df_taste):>6} 行  口味: {', '.join(taste_list)}")
 
-    # ── 4. cuisine 表 (字典) ──
     df_cuisine = pd.read_sql_query("SELECT id, name FROM cuisine WHERE id > 0", conn)
     print(f"  [cuisine]        {len(df_cuisine):>6} 行  菜系数: {len(df_cuisine)}")
 
-    # ── 5. foodtype 表 (字典) ──
     df_foodtype = pd.read_sql_query("SELECT id, name FROM foodtype WHERE id > 0", conn)
     print(f"  [foodtype]       {len(df_foodtype):>6} 行  类型数: {len(df_foodtype)}")
 
-    # ── 6. nature 表 (字典) ──
     df_nature = pd.read_sql_query("SELECT id, name FROM nature WHERE id > 0", conn)
     print(f"  [nature]         {len(df_nature):>6} 行  性质: {', '.join(df_nature['name'].tolist())}")
 
-    # ── 7. ingredient 表 ──
     df_ingredient = pd.read_sql_query("""
         SELECT id, name, foodtype FROM ingredient WHERE id > 0
     """, conn)
-    print(f"  [ingredient]     {len(df_ingredient):>6} 行  "
-          f"使用: id, name, foodtype")
+    print(f"  [ingredient]     {len(df_ingredient):>6} 行  使用: id, name, foodtype")
 
-    # ── 8. ingredient2taste 表 ──
     df_ing2taste = pd.read_sql_query("""
         SELECT food AS ingredient_id, taste AS taste_id FROM ingredient2taste
     """, conn)
-    print(f"  [ingredient2taste] {len(df_ing2taste):>5} 行  "
-          f"使用: food→ingredient, taste")
+    print(f"  [ingredient2taste] {len(df_ing2taste):>5} 行")
 
-    # ── 9. ingredient2nature 表 ──
     df_ing2nature = pd.read_sql_query("""
         SELECT food AS ingredient_id, nature AS nature_id FROM ingredient2nature
     """, conn)
-    print(f"  [ingredient2nature] {len(df_ing2nature):>5} 行  "
-          f"使用: food→ingredient, nature")
+    print(f"  [ingredient2nature] {len(df_ing2nature):>5} 行")
 
-    # ── 10. recipe 表 ──
     df_recipe = pd.read_sql_query("""
         SELECT id, name, cuisine, gi, timeconsumming, cost FROM recipe WHERE id > 0
     """, conn)
     print(f"  [recipe]         {len(df_recipe):>6} 行  "
           f"使用: id, name, cuisine, gi, timeconsumming, cost")
 
-    # ── 11. recipeingredient 表 ──
     df_recipe_ing = pd.read_sql_query("""
         SELECT recipe AS recipe_id, ingredient AS ingredient_id
-        FROM recipeingredient
-        WHERE recipe > 0 AND ingredient > 0
+        FROM recipeingredient WHERE recipe > 0 AND ingredient > 0
     """, conn)
-    print(f"  [recipeingredient] {len(df_recipe_ing):>5} 行  "
-          f"使用: recipe, ingredient")
+    print(f"  [recipeingredient] {len(df_recipe_ing):>5} 行")
 
-    # ── 12. cookstep 表 ──
     df_cookstep = pd.read_sql_query("""
         SELECT recipe AS recipe_id, cookmethod AS cookmethod_id
         FROM cookstep WHERE recipe > 0
     """, conn)
-    print(f"  [cookstep]       {len(df_cookstep):>6} 行  "
-          f"使用: recipe, cookmethod")
+    print(f"  [cookstep]       {len(df_cookstep):>6} 行")
 
-    # ── 13. cookmethod 表 (字典) ──
     df_cookmethod = pd.read_sql_query("SELECT id, name FROM cookmethod WHERE id > 0", conn)
-    print(f"  [cookmethod]     {len(df_cookmethod):>6} 行  "
-          f"方式: {', '.join(df_cookmethod['name'].tolist()[:8])}")
+    print(f"  [cookmethod]     {len(df_cookmethod):>6} 行")
 
-    # ── 14. recipecomposite + composition → 菜谱营养 ──
     df_recipe_nut = pd.read_sql_query("""
         SELECT rc.recipe AS recipe_id, c.name AS nutrient_name, rc.quantity
-        FROM recipecomposite rc
-        JOIN composition c ON c.id = rc.composition
+        FROM recipecomposite rc JOIN composition c ON c.id = rc.composition
         WHERE rc.recipe > 0
     """, conn)
     nut_pivot = df_recipe_nut.pivot_table(
@@ -175,10 +165,8 @@ def load_data_from_db():
         if col not in nut_pivot.columns:
             nut_pivot[col] = 0.0
     nut_pivot = nut_pivot[['recipe_id'] + common_nutrients].fillna(0)
-    print(f"  [recipecomposite+composition+content] → {len(nut_pivot)} 菜谱营养 "
-          f"维度: {common_nutrients}")
+    print(f"  [recipecomposite+composition+content] → {len(nut_pivot)} 菜谱营养")
 
-    # ── 15. 用户-菜谱交互数据 ──
     df_fond = pd.read_sql_query("""
         SELECT user AS user_id, recipe AS recipe_id, intensity, 'fond' AS source
         FROM userfondnessrecipe WHERE user > 0 AND recipe > 0
@@ -199,15 +187,12 @@ def load_data_from_db():
 
     df_browse = pd.read_sql_query("""
         SELECT ub.user AS user_id, ubd.entityid AS recipe_id, 2 AS intensity, 'browse' AS source
-        FROM userbrowse ub
-        JOIN userbrowsedetail ubd ON ubd.userbrowse = ub.id
+        FROM userbrowse ub JOIN userbrowsedetail ubd ON ubd.userbrowse = ub.id
         WHERE ub.user > 0 AND ubd.entityid > 0
     """, conn)
     print(f"  [userbrowse+browsedetail] {len(df_browse):>5} 行")
-
     conn.close()
 
-    # ── 合并交互构建伪评分 ──
     interactions = []
     for _, row in df_actual.iterrows():
         interactions.append({'user_id': int(row['user_id']), 'recipe_id': int(row['recipe_id']), 'rating': 5.0})
@@ -218,36 +203,24 @@ def load_data_from_db():
         interactions.append({'user_id': int(row['user_id']), 'recipe_id': int(row['recipe_id']), 'rating': 1.0})
     for _, row in df_browse.iterrows():
         interactions.append({'user_id': int(row['user_id']), 'recipe_id': int(row['recipe_id']), 'rating': 2.5})
-
     df_interactions = pd.DataFrame(interactions).drop_duplicates(subset=['user_id', 'recipe_id'])
     print(f"\n  → 合并交互矩阵: {len(df_interactions)} 条 (去重后)")
 
     return {
-        'user': df_user,
-        'usertaste': df_usertaste,
-        'taste': df_taste,
-        'taste_list': taste_list,
-        'cuisine': df_cuisine,
-        'foodtype': df_foodtype,
-        'nature': df_nature,
-        'ingredient': df_ingredient,
-        'ing2taste': df_ing2taste,
-        'ing2nature': df_ing2nature,
-        'recipe': df_recipe,
-        'recipe_ing': df_recipe_ing,
-        'cookstep': df_cookstep,
-        'cookmethod': df_cookmethod,
-        'recipe_nut': nut_pivot,
+        'user': df_user, 'usertaste': df_usertaste, 'taste': df_taste,
+        'taste_list': taste_list, 'cuisine': df_cuisine, 'foodtype': df_foodtype,
+        'nature': df_nature, 'ingredient': df_ingredient, 'ing2taste': df_ing2taste,
+        'ing2nature': df_ing2nature, 'recipe': df_recipe, 'recipe_ing': df_recipe_ing,
+        'cookstep': df_cookstep, 'cookmethod': df_cookmethod, 'recipe_nut': nut_pivot,
         'interactions': df_interactions,
     }
 
 
 # ============================================================
-# 第二部分：特征工程（完全从数据库表头提取）
+# 第二部分：特征工程（CPU 上构建，构建完一次性转到 GPU）
 # ============================================================
 
 def build_features(data):
-    """从数据库真实字段构建用户向量 U 和菜谱向量 V，返回 GPU 数组"""
     print("\n" + "=" * 70)
     print("  特征工程：构建 U (用户) 和 V (菜谱) 向量")
     print("=" * 70)
@@ -272,7 +245,6 @@ def build_features(data):
     n_cookmethods = len(df_cookmethod)
     nut_pivot = data['recipe_nut']
 
-    from datetime import datetime
     now = datetime.now()
     def get_age_group(bday_str):
         if pd.isna(bday_str) or str(bday_str).strip() == '':
@@ -305,11 +277,6 @@ def build_features(data):
     print("\n  ┌─ 用户特征向量 U 的构成 ─────────────────────")
     print(f"  │ 特征组               维度    来源表.字段")
     print(f"  ├─────────────────────────────────────────────")
-
-    user_ids = df_user['id'].tolist()
-    user_id_to_idx = {uid: i for i, uid in enumerate(user_ids)}
-    n_users = len(user_ids)
-
     gender_dim = 3
     print(f"  │ 1.性别(OneHot)      {gender_dim:>4}     user.gender")
     age_dim = len(age_order)
@@ -327,21 +294,22 @@ def build_features(data):
     print(f"  │ 总计 d_u = {d_u}")
     print(f"  └─────────────────────────────────────────────")
 
-    # 用 xp 构建 U（直接构建 GPU 数组或 CPU 数组取决于 xp）
-    U_cpu = xp.zeros((n_users, d_u), dtype=xp.float32)
+    user_ids = df_user['id'].tolist()
+    user_id_to_idx = {uid: i for i, uid in enumerate(user_ids)}
+    n_users = len(user_ids)
 
+    # 用 CPU numpy 构建（避免逐元素 GPU kernel 开销），构建完一次性转移
+    U = np.zeros((n_users, d_u), dtype=np.float32)
     user_taste_map = {}
     for _, row in df_taste_ut.iterrows():
         uid = row['user']
-        if uid not in user_id_to_idx:
-            continue
+        if uid not in user_id_to_idx: continue
         tname = row['taste_name']
-        if tname not in taste_list:
-            continue
+        if tname not in taste_list: continue
         level_val = row['level']
         level = float(level_val) if pd.notna(level_val) else 0.0
         if uid not in user_taste_map:
-            user_taste_map[uid] = xp.zeros(n_tastes, dtype=xp.float32)
+            user_taste_map[uid] = np.zeros(n_tastes, dtype=np.float32)
         t_idx = taste_list.index(tname)
         user_taste_map[uid][t_idx] = level / 5.0
 
@@ -350,66 +318,52 @@ def build_features(data):
         row = df_user[df_user['id'] == uid].iloc[0]
         pos = 0
         g = str(row['gender']).strip()
-        U_cpu[idx, pos + (0 if g == '男' else 1 if g == '女' else 2)] = 1
+        U[idx, pos + (0 if g == '男' else 1 if g == '女' else 2)] = 1
         pos += gender_dim
         ag = row['age_group']
-        U_cpu[idx, pos + (age_order.index(ag) if ag in age_order else len(age_order)-1)] = 1
+        U[idx, pos + (age_order.index(ag) if ag in age_order else len(age_order)-1)] = 1
         pos += age_dim
         occ = row['occupation']
         if pd.notna(occ) and occ in occ_list:
-            U_cpu[idx, pos + occ_list.index(occ)] = 1
+            U[idx, pos + occ_list.index(occ)] = 1
         pos += occ_dim
         if uid in user_taste_map:
-            U_cpu[idx, pos:pos+taste_dim] = user_taste_map[uid]
+            U[idx, pos:pos+taste_dim] = user_taste_map[uid]
         pos += taste_dim
         bp = row['birthplace']
         if pd.notna(bp) and bp in all_addrs:
             bp_idx = all_addrs.index(bp)
             if bp_idx < n_addr:
-                U_cpu[idx, pos + bp_idx] = 1
+                U[idx, pos + bp_idx] = 1
         pos += bplace_dim
         wp = row['workplace']
         if pd.notna(wp) and wp in all_addrs:
             wp_idx = all_addrs.index(wp)
             if wp_idx < n_addr:
-                U_cpu[idx, pos + wp_idx] = 1
-
-    # 如果 U_cpu 是 numpy 数组且 GPU 可用，转移到 GPU
-    if _HAS_CUDA and isinstance(U_cpu, xp.ndarray) and not hasattr(U_cpu, 'device'):
-        U = cp.asarray(U_cpu)
-    else:
-        U = U_cpu
-
+                U[idx, pos + wp_idx] = 1
     print(f"  → U shape: {U.shape}")
 
-    # ── 构建菜谱特征向量 V ──
+    # ── 构建 V（CPU numpy） ──
     print(f"\n  ┌─ 菜谱特征向量 V 的构成 ─────────────────────")
     print(f"  │ 特征组               维度    来源表.字段")
     print(f"  ├─────────────────────────────────────────────")
-
     recipe_ids = df_recipe['id'].tolist()
     recipe_id_to_idx = {rid: i for i, rid in enumerate(recipe_ids)}
     n_recipes = len(recipe_ids)
-
     cuisine_dim = n_cuisines
     print(f"  │ 1.菜系(OneHot)      {cuisine_dim:>4}     recipe.cuisine→cuisine")
     print(f"  │ 2.GI/时长/成本       3     recipe.gi, timeconsumming, cost")
-    taste_agg_dim = n_tastes
-    print(f"  │ 3.口味特征(聚合)     {taste_agg_dim:>4}     recipeingredient→ingredient→ingredient2taste→taste")
-    nature_dim = n_natures
-    print(f"  │ 4.食性特征(聚合)     {nature_dim:>4}     recipeingredient→ingredient→ingredient2nature→nature")
-    nut_dim = 5
-    print(f"  │ 5.营养成分(归一化)    {nut_dim:>4}     recipecomposite→composition→content")
-    ft_dim = n_foodtypes
-    print(f"  │ 6.食材类型(TF-IDF)   {ft_dim:>4}     recipeingredient→ingredient.foodtype→foodtype")
-    cm_dim = n_cookmethods
-    print(f"  │ 7.烹饪方式(MultiHot) {cm_dim:>4}     cookstep.cookmethod→cookmethod")
-    d_v = cuisine_dim + 3 + taste_agg_dim + nature_dim + nut_dim + ft_dim + cm_dim
+    print(f"  │ 3.口味特征(聚合)     {n_tastes:>4}     ingredient→ingredient2taste→taste")
+    print(f"  │ 4.食性特征(聚合)     {n_natures:>4}     ingredient→ingredient2nature→nature")
+    print(f"  │ 5.营养成分(归一化)     5     recipecomposite→composition→content")
+    print(f"  │ 6.食材类型(TF-IDF)   {n_foodtypes:>4}     ingredient.foodtype→foodtype")
+    print(f"  │ 7.烹饪方式(MultiHot) {n_cookmethods:>4}     cookstep.cookmethod→cookmethod")
+    d_v = cuisine_dim + 3 + n_tastes + n_natures + 5 + n_foodtypes + n_cookmethods
     print(f"  ├─────────────────────────────────────────────")
     print(f"  │ 总计 d_v = {d_v}")
     print(f"  └─────────────────────────────────────────────")
 
-    V_cpu = xp.zeros((n_recipes, d_v), dtype=xp.float32)
+    V = np.zeros((n_recipes, d_v), dtype=np.float32)
 
     ing_foodtype = dict(zip(df_ing['id'], df_ing['foodtype']))
     ing_to_tastes = defaultdict(set)
@@ -419,15 +373,12 @@ def build_features(data):
     for _, row in df_ing2n.iterrows():
         ing_to_natures[int(row['ingredient_id'])].add(int(row['nature_id']))
 
-    ft_doc_count = defaultdict(int)
+    ft_doc_count = defaultdict(set)
     for _, row in df_recipe_ing.iterrows():
-        rid = row['recipe_id']
         ing = row['ingredient_id']
         ft = ing_foodtype.get(ing)
         if ft and ft > 0:
-            ft_doc_count[rid] = ft_doc_count.get(rid, set())
-            if isinstance(ft_doc_count[rid], set):
-                ft_doc_count[rid].add(ft)
+            ft_doc_count[int(row['recipe_id'])].add(ft)
     ft_global = defaultdict(int)
     for rid, fts in ft_doc_count.items():
         for ft in fts:
@@ -440,90 +391,69 @@ def build_features(data):
             recipe_cm[int(row['recipe_id'])].add(int(cm))
 
     for rid in recipe_ids:
-        if rid not in recipe_id_to_idx:
-            continue
+        if rid not in recipe_id_to_idx: continue
         idx = recipe_id_to_idx[rid]
         r_row = df_recipe[df_recipe['id'] == rid]
-        if len(r_row) == 0:
-            continue
+        if len(r_row) == 0: continue
         r_row = r_row.iloc[0]
         pos = 0
         cid = r_row['cuisine']
         if pd.notna(cid) and 0 < cid <= n_cuisines:
-            V_cpu[idx, pos + int(cid) - 1] = 1
+            V[idx, pos + int(cid) - 1] = 1
         pos += cuisine_dim
-        gi_val = r_row['gi']
-        gi = float(gi_val) if pd.notna(gi_val) else 50.0
-        V_cpu[idx, pos] = min(max(gi / 100.0, 0), 1)
-        t_val = r_row['timeconsumming']
-        t = float(t_val) if pd.notna(t_val) else 30.0
-        V_cpu[idx, pos+1] = xp.log1p(t) / xp.log1p(120)
-        cost_val = r_row['cost']
-        cost = float(cost_val) if pd.notna(cost_val) else 20.0
-        V_cpu[idx, pos+2] = min(max(cost / 80.0, 0), 1)
+        V[idx, pos] = np.clip(float(r_row['gi'] if pd.notna(r_row['gi']) else 50) / 100, 0, 1)
+        V[idx, pos+1] = np.log1p(float(r_row['timeconsumming'] if pd.notna(r_row['timeconsumming']) else 30)) / np.log1p(120)
+        V[idx, pos+2] = np.clip(float(r_row['cost'] if pd.notna(r_row['cost']) else 20) / 80, 0, 1)
         pos += 3
         ings = df_recipe_ing[df_recipe_ing['recipe_id'] == rid]['ingredient_id'].values
-        taste_vec = xp.zeros(n_tastes, dtype=xp.float32)
-        taste_count = 0
+        taste_vec = np.zeros(n_tastes, dtype=np.float32)
+        tc = 0
         for ing in ings:
             for t_id in ing_to_tastes.get(int(ing), set()):
                 if 0 < t_id <= n_tastes:
-                    taste_vec[int(t_id)-1] += 1
-                    taste_count += 1
-        if taste_count > 0:
-            taste_vec /= taste_count
-        else:
-            taste_vec = xp.ones(n_tastes, dtype=xp.float32) * 0.3
-        V_cpu[idx, pos:pos+n_tastes] = taste_vec
-        pos += taste_agg_dim
-        nature_vec = xp.zeros(n_natures, dtype=xp.float32)
+                    taste_vec[int(t_id)-1] += 1; tc += 1
+        if tc > 0: taste_vec /= tc
+        else: taste_vec[:] = 0.3
+        V[idx, pos:pos+n_tastes] = taste_vec
+        pos += n_tastes
+        nature_vec = np.zeros(n_natures, dtype=np.float32)
         for ing in ings:
             for n_id in ing_to_natures.get(int(ing), set()):
-                if 0 < n_id <= n_natures:
-                    nature_vec[int(n_id)-1] += 1
-        if xp.sum(nature_vec) > 0:
-            nature_vec /= xp.sum(nature_vec)
-        V_cpu[idx, pos:pos+n_natures] = nature_vec
-        pos += nature_dim
+                if 0 < n_id <= n_natures: nature_vec[int(n_id)-1] += 1
+        if nature_vec.sum() > 0: nature_vec /= nature_vec.sum()
+        V[idx, pos:pos+n_natures] = nature_vec
+        pos += n_natures
+        common_nutrients = ['能量', '蛋白质', '脂肪', '碳水化合物', '膳食纤维']
         nut_row = nut_pivot[nut_pivot['recipe_id'] == rid]
-        common = ['能量', '蛋白质', '脂肪', '碳水化合物', '膳食纤维']
-        max_vals = {'能量': 800, '蛋白质': 50, '脂肪': 60, '碳水化合物': 100, '膳食纤维': 15}
         if len(nut_row) > 0:
-            for ci, cn in enumerate(common):
-                raw_val = nut_row.iloc[0].get(cn, 0)
-                val = float(raw_val) if pd.notna(raw_val) else 0.0
-                V_cpu[idx, pos+ci] = min(max(val / max_vals.get(cn, 100), 0), 1)
-        pos += nut_dim
-        ft_vec = xp.zeros(n_foodtypes, dtype=xp.float32)
-        ft_counts = defaultdict(int)
-        total_ings = 0
+            max_vals = {'能量': 800, '蛋白质': 50, '脂肪': 60, '碳水化合物': 100, '膳食纤维': 15}
+            for ci, cn in enumerate(common_nutrients):
+                v = float(nut_row.iloc[0].get(cn, 0)) if pd.notna(nut_row.iloc[0].get(cn, 0)) else 0
+                V[idx, pos+ci] = np.clip(v / max_vals.get(cn, 100), 0, 1)
+        pos += 5
+        ft_vec = np.zeros(n_foodtypes, dtype=np.float32)
+        ftc = defaultdict(int); ti = 0
         for ing in ings:
             ft = ing_foodtype.get(int(ing))
             if ft and ft > 0 and ft <= n_foodtypes:
-                ft_counts[int(ft)-1] += 1
-                total_ings += 1
-        if total_ings > 0:
+                ftc[int(ft)-1] += 1; ti += 1
+        if ti > 0:
             for ft_idx in range(n_foodtypes):
-                tf = ft_counts[ft_idx] / total_ings
-                idf = xp.log(n_recipes / (1 + ft_global.get(ft_idx+1, 1)))
-                ft_vec[ft_idx] = tf * idf
+                ft_vec[ft_idx] = (ftc[ft_idx] / ti) * np.log(n_recipes / (1 + ft_global.get(ft_idx+1, 1)))
         else:
-            ft_vec = xp.ones(n_foodtypes, dtype=xp.float32) / n_foodtypes
-        V_cpu[idx, pos:pos+n_foodtypes] = ft_vec
-        pos += ft_dim
+            ft_vec[:] = 1.0 / n_foodtypes
+        V[idx, pos:pos+n_foodtypes] = ft_vec
+        pos += n_foodtypes
         for cm in recipe_cm.get(rid, set()):
-            if 0 < cm <= n_cookmethods:
-                V_cpu[idx, pos + int(cm) - 1] = 1
-
-    # 转移到 GPU
-    if _HAS_CUDA and isinstance(V_cpu, xp.ndarray) and not hasattr(V_cpu, 'device'):
-        V = cp.asarray(V_cpu)
-    else:
-        V = V_cpu
-
+            if 0 < cm <= n_cookmethods: V[idx, pos + int(cm) - 1] = 1
     print(f"  → V shape: {V.shape}")
-    U = xp.nan_to_num(U, nan=0.0)
-    V = xp.nan_to_num(V, nan=0.0)
+
+    U = np.nan_to_num(U, nan=0.0)
+    V = np.nan_to_num(V, nan=0.0)
+
+    # 一次性转移到 GPU
+    U = _to_gpu(U)
+    V = _to_gpu(V)
     return U, V, user_id_to_idx, recipe_id_to_idx
 
 
@@ -537,111 +467,120 @@ def build_rating_matrix(data, user_id_to_idx, recipe_id_to_idx):
     n_users = len(user_id_to_idx)
     n_recipes = len(recipe_id_to_idx)
 
-    R = xp.full((n_users, n_recipes), xp.nan, dtype=xp.float32)
-
+    R = np.full((n_users, n_recipes), np.nan, dtype=np.float32)
     for _, row in interactions.iterrows():
-        u = int(row['user_id'])
-        r = int(row['recipe_id'])
+        u = int(row['user_id']); r = int(row['recipe_id'])
         if u in user_id_to_idx and r in recipe_id_to_idx:
             R[user_id_to_idx[u], recipe_id_to_idx[r]] = float(row['rating'])
-
-    rated = int(xp.sum(~xp.isnan(R)))
+    rated = int(np.sum(~np.isnan(R)))
     density = rated / (n_users * n_recipes)
     print(f"\n[评分矩阵] R: {R.shape}, 评分数={rated}, 稠密度={density:.6f}")
-    return R
+    return _to_gpu(R)
 
 
 # ============================================================
-# 第四部分~第十部分：CF 模型（GPU 版本）
+# 第四部分：CF 模型（向量化 GPU 版本）
 # ============================================================
 
 class UserBasedCF:
+    """用户协同过滤。fit 和 predict_all 全部向量化。"""
     def __init__(self, U, K=50, alpha=0.6, tau_min=5):
         self.U, self.K, self.alpha, self.tau_min = U, K, alpha, tau_min
+
     def fit(self, R):
         self.R, self.n_users, self.n_recipes = R.copy(), R.shape[0], R.shape[1]
         self.r_mean = xp.nanmean(R, axis=1)
         Rc = xp.nan_to_num(R - self.r_mean[:, xp.newaxis], 0)
         self.sim_matrix = cosine_similarity_gpu(Rc)
         self.profile_sim = cosine_similarity_gpu(self.U)
-        n = self.n_users
-        self.sim_fused = xp.zeros((n, n), dtype=xp.float32)
-        for u in range(n):
-            for v in range(u+1, n):
-                cu = float(xp.sum(~xp.isnan(R[u]) & ~xp.isnan(R[v])))
-                ae = self.alpha * min(1.0, cu/self.tau_min)
-                sv = ae * float(self.sim_matrix[u,v]) + (1-ae) * float(self.profile_sim[u,v])
-                self.sim_fused[u,v] = self.sim_fused[v,u] = sv
-            self.sim_fused[u,u] = 1.0
+
+        # 向量化共评次数: not_nan @ not_nan.T = 每对用户的共同评分个数
+        not_nan = (~xp.isnan(R)).astype(xp.float32)
+        co_count = not_nan @ not_nan.T                 # (n_users, n_users)
+        ae = self.alpha * xp.minimum(1.0, co_count / self.tau_min)
+        self.sim_fused = ae * self.sim_matrix + (1 - ae) * self.profile_sim
+        xp.fill_diagonal(self.sim_fused, 1.0)
         print(f"  [User-CF] 相似度矩阵: {self.sim_fused.shape}")
-    def predict(self, u, i):
-        if not xp.isnan(self.R[u,i]): return float(self.R[u,i])
-        rated = xp.where(~xp.isnan(self.R[:,i]))[0]
-        if len(rated)==0: return float(self.r_mean[u])
-        sims = self.sim_fused[u, rated]
-        top = xp.argsort(sims)[-self.K:]
-        tu, ts = rated[top], sims[top]
-        pm = ts > 0
-        if not xp.any(pm): return float(self.r_mean[u])
-        tu, ts = tu[pm], ts[pm]
-        num = float(xp.sum(ts * (self.R[tu, i] - self.r_mean[tu])))
-        den = float(xp.sum(xp.abs(ts)))
-        return float(self.r_mean[u]) + num/den if den else float(self.r_mean[u])
+
     def predict_all(self):
+        """对每个物品，一次向量化计算所有用户的预测"""
         R_pred = self.R.copy()
-        for u in range(self.n_users):
-            for i in range(self.n_recipes):
-                if xp.isnan(R_pred[u,i]):
-                    R_pred[u,i] = self.predict(u,i)
+        K = self.K
+        for i in range(self.n_recipes):
+            rated = xp.where(~xp.isnan(self.R[:, i]))[0]
+            if len(rated) == 0:
+                continue
+            kk = min(K, len(rated))
+            sims = self.sim_fused[:, rated]                 # (n_users, n_rated)
+            top_local = xp.argsort(sims, axis=1)[:, -kk:]   # (n_users, kk)
+            ts = xp.take_along_axis(sims, top_local, axis=1)  # (n_users, kk)
+            tu = rated[top_local]                           # (n_users, kk)
+            pm = ts > 0
+            R_vals = self.R[tu, i]                          # (n_users, kk)
+            rmean_vals = self.r_mean[tu]
+            num = xp.sum(xp.where(pm, ts * (R_vals - rmean_vals), 0), axis=1)
+            den = xp.sum(xp.where(pm, xp.abs(ts), 0), axis=1)
+            pred = self.r_mean + xp.where(den > 0, num / xp.maximum(den, 1), 0)
+            fill = xp.isnan(R_pred[:, i])
+            R_pred[fill, i] = pred[fill]
         return R_pred
 
 
 class ItemBasedCF:
+    """物品协同过滤。fit 和 predict_all 全部向量化。"""
     def __init__(self, V, K=30, beta=0.6, tau_min=5):
         self.V, self.K, self.beta, self.tau_min = V, K, beta, tau_min
+
     def fit(self, R):
         self.R, self.n_users, self.n_recipes = R.copy(), R.shape[0], R.shape[1]
         rm = xp.nanmean(R, axis=1)
         Rc = xp.nan_to_num(R - rm[:, xp.newaxis], 0)
         self.co_sim = cosine_similarity_gpu(Rc.T)
         self.content_sim = cosine_similarity_gpu(self.V)
-        n = self.n_recipes
         self.item_uc = xp.sum(~xp.isnan(R), axis=0)
-        self.sim_fused = xp.zeros((n, n), dtype=xp.float32)
-        for i in range(n):
-            for j in range(i+1, n):
-                cu = float(xp.sum(~xp.isnan(R[:,i]) & ~xp.isnan(R[:,j])))
-                be = self.beta * min(1.0, cu/self.tau_min)
-                sv = be * float(self.co_sim[i,j]) + (1-be) * float(self.content_sim[i,j])
-                self.sim_fused[i,j] = self.sim_fused[j,i] = sv
-            self.sim_fused[i,i] = 1.0
+
+        # 向量化共评次数: not_nan.T @ not_nan = 每对物品的共同评分个数
+        not_nan = (~xp.isnan(R)).astype(xp.float32)
+        co_count = not_nan.T @ not_nan                      # (n_items, n_items)
+        be = self.beta * xp.minimum(1.0, co_count / self.tau_min)
+        self.sim_fused = be * self.co_sim + (1 - be) * self.content_sim
+        xp.fill_diagonal(self.sim_fused, 1.0)
         print(f"  [Item-CF] 相似度矩阵: {self.sim_fused.shape}")
-    def predict(self, u, i):
-        if not xp.isnan(self.R[u,i]): return float(self.R[u,i])
-        rated = xp.where(~xp.isnan(self.R[u]))[0]
-        if len(rated)==0: return 3.0
-        sims = self.sim_fused[i, rated]
-        top = xp.argsort(sims)[-self.K:]
-        ti, ts = rated[top], sims[top]
-        pm = ts > 0
-        if not xp.any(pm): return float(xp.nanmean(self.R[u,rated]))
-        ti, ts = ti[pm], ts[pm]
-        return float(xp.sum(ts * self.R[u,ti]) / xp.sum(xp.abs(ts)))
+
     def predict_all(self):
+        """对每个用户，一次向量化计算所有物品的预测"""
         R_pred = self.R.copy()
+        K = self.K
         for u in range(self.n_users):
-            for i in range(self.n_recipes):
-                if xp.isnan(R_pred[u,i]): R_pred[u,i] = self.predict(u,i)
+            rated = xp.where(~xp.isnan(self.R[u]))[0]
+            if len(rated) == 0:
+                continue
+            kk = min(K, len(rated))
+            sims = self.sim_fused[:, rated]                  # (n_items, n_rated)
+            top_local = xp.argsort(sims, axis=1)[:, -kk:]    # (n_items, kk)
+            ts = xp.take_along_axis(sims, top_local, axis=1)  # (n_items, kk)
+            ti = rated[top_local]                            # (n_items, kk)
+            pm = ts > 0
+            R_vals = self.R[u, ti]                           # (n_items, kk)
+            num = xp.sum(xp.where(pm, ts * R_vals, 0), axis=1)
+            den = xp.sum(xp.where(pm, xp.abs(ts), 0), axis=1)
+            fallback = xp.nanmean(self.R[u, rated])
+            pred = xp.where(den > 0, num / xp.maximum(den, 1), fallback)
+            fill = xp.isnan(R_pred[u])
+            R_pred[u, fill] = pred[fill]
         return R_pred
 
 
 class SVDRecommender:
-    def __init__(self, k=50, lr=0.01, reg=0.05, epochs=40, V=None):
+    """SVD 矩阵分解，mini-batch SGD 训练（向量化）。"""
+    def __init__(self, k=50, lr=0.01, reg=0.05, epochs=40, V=None, batch_size=1024):
         self.k, self.lr, self.reg, self.epochs, self.V = k, lr, reg, epochs, V
+        self.batch_size = batch_size
+
     def fit(self, R):
         self.R, self.n_users, self.n_recipes = R.copy(), R.shape[0], R.shape[1]
         self.mu = float(xp.nanmean(R))
-        rng = xp.random.RandomState(42)
+        rng = np.random.default_rng(42)
         self.b_u = xp.zeros(self.n_users, dtype=xp.float32)
         self.b_i = xp.zeros(self.n_recipes, dtype=xp.float32)
 
@@ -656,42 +595,48 @@ class SVDRecommender:
             self.q_i = rng.normal(0, 0.1, (self.n_recipes, self.k)).astype(xp.float32)
         self.p_u = rng.normal(0, 0.1, (self.n_users, self.k)).astype(xp.float32) * 0.1
 
-        pairs = [(u, i, float(R[u,i]))
-                 for u in range(self.n_users)
-                 for i in range(self.n_recipes)
-                 if not xp.isnan(R[u,i])]
-        import random as _random
+        # 构建 (user, item, rating) 索引，CPU 上构造
+        R_cpu = _to_cpu(R)
+        pairs = np.argwhere(~np.isnan(R_cpu)).astype(np.int32)          # (N, 2)
+        pair_ratings = R_cpu[pairs[:, 0], pairs[:, 1]].astype(np.float32)
+        N = len(pairs)
+        print(f"  [SVD] 训练样本 {N} 条, batch_size={self.batch_size}")
+        bs = self.batch_size
         lr = self.lr
         for ep in range(self.epochs):
+            rng.shuffle(pairs)
             tl = 0.0
-            _random.shuffle(pairs)
-            for u, i, r_ui in pairs:
-                pred = self.mu + self.b_u[u] + self.b_i[i] + xp.dot(self.p_u[u], self.q_i[i])
-                err = r_ui - float(pred)
-                tl += err * err
-                self.b_u[u] += lr * (err - self.reg * self.b_u[u])
-                self.b_i[i] += lr * (err - self.reg * self.b_i[i])
-                pu_old = self.p_u[u].copy()
-                self.p_u[u] += lr * (err * self.q_i[i] - self.reg * self.p_u[u])
-                self.q_i[i] += lr * (err * pu_old - self.reg * self.q_i[i])
+            for start in range(0, N, bs):
+                b = pairs[start:start+bs]
+                bu = b[:, 0]; bi = b[:, 1]
+                br = _to_gpu(pair_ratings[start:start+bs])
+                pred = self.mu + self.b_u[bu] + self.b_i[bi] + \
+                       xp.sum(self.p_u[bu] * self.q_i[bi], axis=1)
+                err = br - pred
+                tl += float(xp.sum(err ** 2))
+                pu_old = self.p_u[bu].copy()
+                xp.add.at(self.b_u, bu, lr * (err - self.reg * self.b_u[bu]))
+                xp.add.at(self.b_i, bi, lr * (err - self.reg * self.b_i[bi]))
+                xp.add.at(self.p_u, bu, lr * (err[:, None] * self.q_i[bi] - self.reg * pu_old))
+                xp.add.at(self.q_i, bi, lr * (err[:, None] * pu_old - self.reg * self.q_i[bi]))
             lr *= 0.95
             if (ep+1) % 10 == 0 or ep == 0:
-                print(f"  [SVD] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={xp.sqrt(tl/len(pairs)):.4f}")
-    def predict(self, u, i):
-        return float(self.mu + self.b_u[u] + self.b_i[i] + xp.dot(self.p_u[u], self.q_i[i]))
+                print(f"  [SVD] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={xp.sqrt(tl/N):.4f}")
+
     def predict_all(self):
         R_pred = self.mu + self.b_u[:, None] + self.b_i[None, :] + xp.dot(self.p_u, self.q_i.T)
         R_pred = xp.clip(R_pred, 1, 5)
-        for u in range(self.n_users):
-            for i in range(self.n_recipes):
-                if not xp.isnan(self.R[u,i]):
-                    R_pred[u,i] = self.R[u,i]
+        # 训练过的位置用真实评分覆盖
+        R_pred[xp.where(~xp.isnan(self.R))] = self.R[xp.where(~xp.isnan(self.R))]
         return R_pred
 
 
 class TwoTowerRecommender:
-    def __init__(self, reg=0.1, latent_dim=8):
+    """双塔模型，mini-batch SGD 训练（向量化）。"""
+    def __init__(self, reg=0.1, latent_dim=32, batch_size=1024):
         self.reg, self.latent_dim = reg, latent_dim
+        self.batch_size = batch_size
+
     def fit(self, R, U, V):
         self.R, self.U, self.V = R.copy(), U, V
         self.n_users, self.n_recipes = R.shape
@@ -703,59 +648,75 @@ class TwoTowerRecommender:
         k = min(self.latent_dim, du, dv)
         self.A = xp.random.randn(du, k).astype(xp.float32) * 0.01
         self.B = xp.random.randn(dv, k).astype(xp.float32) * 0.01
+
+        R_cpu = _to_cpu(R)
+        pairs = np.argwhere(~np.isnan(R_cpu)).astype(np.int32)
+        pair_ratings = R_cpu[pairs[:, 0], pairs[:, 1]].astype(np.float32)
+        N = len(pairs)
+        print(f"  [TwoTower] 训练样本 {N} 条, batch_size={self.batch_size}")
+        bs = self.batch_size
         lr = 0.001
-        pairs = [(u, i, float(R[u,i]))
-                 for u in range(self.n_users)
-                 for i in range(self.n_recipes)
-                 if not xp.isnan(R[u,i])]
+        reg = self.reg
         import random as _random
+        order = np.arange(N)
         for ep in range(40):
+            _random.shuffle(order)
             tl = 0.0
-            _random.shuffle(pairs)
-            w_u, w_v = self.w_u, self.w_v
-            A, B = self.A, self.B
-            reg = self.reg
-            for u, i, r_ui in pairs:
-                up = U[u] @ A      # 每次用最新的 A 算
-                vp = V[i] @ B      # 每次用最新的 B 算
-                pred = self.mu + xp.dot(w_u, U[u]) + xp.dot(w_v, V[i]) + xp.dot(up, vp)
-                err = r_ui - float(pred)
-                tl += err * err
-                w_u += lr * (err * U[u] - reg * w_u)
-                w_v += lr * (err * V[i] - reg * w_v)
-                A += lr * (err * xp.outer(U[u], vp) - reg * A)
-                B += lr * (err * xp.outer(V[i], up) - reg * B)
-            self.A, self.B, self.w_u, self.w_v = A, B, w_u, w_v
+            for start in range(0, N, bs):
+                idx = order[start:start+bs]
+                bu = pairs[idx, 0]; bi = pairs[idx, 1]
+                br = _to_gpu(pair_ratings[idx])
+                Uu = U[bu]  # (B, du)
+                Vi = V[bi]  # (B, dv)
+                up = Uu @ self.A  # (B, k)
+                vp = Vi @ self.B  # (B, k)
+                pred = self.mu + Uu @ self.w_u + Vi @ self.w_v + xp.sum(up * vp, axis=1)
+                err = br - pred
+                tl += float(xp.sum(err ** 2))
+                # 线性项梯度
+                self.w_u += lr * (xp.sum(err[:, None] * Uu, axis=0) - reg * self.w_u)
+                self.w_v += lr * (xp.sum(err[:, None] * Vi, axis=0) - reg * self.w_v)
+                # 交互矩阵梯度（批量外积之和）
+                self.A += lr * (xp.sum(Uu[:, :, None] * err[:, None, None] * vp[:, None, :], axis=0) - reg * self.A)
+                self.B += lr * (xp.sum(Vi[:, :, None] * err[:, None, None] * up[:, None, :], axis=0) - reg * self.B)
             lr *= 0.95
-            n = len(pairs)
             if (ep+1) % 10 == 0 or ep == 0:
-                print(f"  [TwoTower] Epoch {ep+1:3d}/40 RMSE(train)={xp.sqrt(tl/max(n,1)):.4f}")
-    def predict(self, u, i, U, V):
-        linear = self.mu + xp.dot(self.w_u, U[u]) + xp.dot(self.w_v, V[i])
-        inter = xp.dot(U[u] @ self.A, V[i] @ self.B)
-        return float(linear + inter)
+                print(f"  [TwoTower] Epoch {ep+1:3d}/40 RMSE(train)={xp.sqrt(tl/max(N,1)):.4f}")
+
     def predict_all(self, U, V):
-        linear = self.mu + xp.dot(U, self.w_u).reshape(-1,1) + xp.dot(V, self.w_v).reshape(1,-1)
+        linear = self.mu + xp.dot(U, self.w_u).reshape(-1, 1) + xp.dot(V, self.w_v).reshape(1, -1)
         inter = (U @ self.A) @ (V @ self.B).T
         R_pred = xp.clip(linear + inter, 1, 5)
-        for u in range(self.n_users):
-            for i in range(self.n_recipes):
-                if not xp.isnan(self.R[u,i]):
-                    R_pred[u,i] = self.R[u,i]
+        R_pred[xp.where(~xp.isnan(self.R))] = self.R[xp.where(~xp.isnan(self.R))]
         return R_pred
 
 
 class HybridFusion:
+    """动态混合融合，网格搜索与预测全部向量化。"""
     def __init__(self, gamma_u=0.1, gamma_i=0.1):
         self.gamma_u, self.gamma_i = gamma_u, gamma_i
+
     def fit(self, R_train, R_ubcf, R_ibcf, R_svd, R_tt, U, V):
         self.R_train = R_train
         nu = xp.sum(~xp.isnan(R_train), axis=1)
         ni = xp.sum(~xp.isnan(R_train), axis=0)
         self.c_u = 1 - xp.exp(-self.gamma_u * nu)
         self.c_i = 1 - xp.exp(-self.gamma_i * ni)
-        best_rmse, best_w = float('inf'), [0.25]*4
-        print("  [融合] 网格搜索权重...")
+
+        cu = self.c_u[:, None]
+        ci = self.c_i[None, :]
+        # phi: (4, n_users, n_items)
+        phi = xp.stack([
+            cu * (1 - ci) + 0.5,
+            (1 - cu) * ci + 0.5,
+            cu * ci + 0.3,
+            (1 - cu) * (1 - ci) + 0.3,
+        ], axis=0)
+        mask = ~xp.isnan(R_train)
+        n = int(xp.sum(mask))
+
+        best_rmse, best_w = float('inf'), [0.25] * 4
+        print("  [融合] 向量化网格搜索权重...")
         for w1 in xp.arange(0.1, 0.6, 0.1):
             w1 = float(w1)
             for w2 in xp.arange(0.1, 0.6, 0.1):
@@ -763,44 +724,39 @@ class HybridFusion:
                 for w3 in xp.arange(0.1, 0.6, 0.1):
                     w3 = float(w3)
                     w4 = 1.0 - w1 - w2 - w3
-                    if w4 < 0.05: continue
-                    w = [w1, w2, w3, w4]
-                    se = n = 0
-                    for u in range(R_train.shape[0]):
-                        cu = float(self.c_u[u])
-                        for i in range(R_train.shape[1]):
-                            if not xp.isnan(R_train[u,i]):
-                                ci = float(self.c_i[i])
-                                phi = [cu*(1-ci)+0.5, (1-cu)*ci+0.5, cu*ci+0.3, (1-cu)*(1-ci)+0.3]
-                                wd = [w[k]*phi[k] for k in range(4)]
-                                s = sum(wd)
-                                wd = [v/s for v in wd]
-                                pred = (wd[0]*float(R_ubcf[u,i]) + wd[1]*float(R_ibcf[u,i]) +
-                                        wd[2]*float(R_svd[u,i]) + wd[3]*float(R_tt[u,i]))
-                                se += (float(R_train[u,i]) - pred) ** 2
-                                n += 1
-                    rmse = xp.sqrt(se / n) if n else float('inf')
+                    if w4 < 0.05:
+                        continue
+                    w = xp.array([w1, w2, w3, w4], dtype=xp.float32)[:, None, None]
+                    wd = w * phi
+                    wd = wd / wd.sum(axis=0, keepdims=True)
+                    pred = (wd[0] * R_ubcf + wd[1] * R_ibcf +
+                            wd[2] * R_svd + wd[3] * R_tt)
+                    err = R_train - pred
+                    se = float(xp.sum(err[mask] ** 2))
+                    rmse = float(xp.sqrt(se / n))
                     if rmse < best_rmse:
-                        best_rmse, best_w = rmse, w
+                        best_rmse, best_w = rmse, [w1, w2, w3, w4]
         self.base_weights = xp.array(best_w, dtype=xp.float32)
-        print(f"  → 基础权重: UBCF={best_w[0]:.2f} IBCF={best_w[1]:.2f} SVD={best_w[2]:.2f} TwoTower={best_w[3]:.2f}")
+        print(f"  → 基础权重: UBCF={best_w[0]:.2f} IBCF={best_w[1]:.2f} "
+              f"SVD={best_w[2]:.2f} TwoTower={best_w[3]:.2f}")
+
     def predict_all(self, R_ubcf, R_ibcf, R_svd, R_tt):
-        R_pred = xp.zeros_like(R_ubcf)
-        for u in range(R_pred.shape[0]):
-            cu = float(self.c_u[u])
-            for i in range(R_pred.shape[1]):
-                ci = float(self.c_i[i])
-                phi = [cu*(1-ci)+0.5, (1-cu)*ci+0.5, cu*ci+0.3, (1-cu)*(1-ci)+0.3]
-                wd = [float(self.base_weights[k]) * phi[k] for k in range(4)]
-                s = sum(wd)
-                wd = [v/s for v in wd]
-                R_pred[u,i] = (wd[0]*R_ubcf[u,i] + wd[1]*R_ibcf[u,i] +
-                               wd[2]*R_svd[u,i] + wd[3]*R_tt[u,i])
+        cu = self.c_u[:, None]
+        ci = self.c_i[None, :]
+        phi = xp.stack([
+            cu * (1 - ci) + 0.5,
+            (1 - cu) * ci + 0.5,
+            cu * ci + 0.3,
+            (1 - cu) * (1 - ci) + 0.3,
+        ], axis=0)
+        wd = self.base_weights[:, None, None] * phi
+        wd = wd / wd.sum(axis=0, keepdims=True)
+        R_pred = wd[0] * R_ubcf + wd[1] * R_ibcf + wd[2] * R_svd + wd[3] * R_tt
         return R_pred
 
 
 # ============================================================
-# 评价（GPU 版本）
+# 评价（GPU 版本，按用户循环但内部向量化）
 # ============================================================
 
 def evaluate(R_true, R_pred, R_train, K=20):
@@ -875,7 +831,7 @@ def main():
     R = build_rating_matrix(data, uid2idx, rid2idx)
     R_train = R.copy()
     R_test = xp.full_like(R, xp.nan)
-    rng = xp.random.RandomState(42)
+    rng = np.random.default_rng(42)
     for u in range(R.shape[0]):
         rated = xp.where(~xp.isnan(R[u]))[0]
         if len(rated) >= 3:
@@ -914,7 +870,7 @@ def main():
     print("\n>>> 离线评估")
     evaluate(R_test, R_final, R_train, K=20)
 
-    # ─── 示例推荐（打印时需要将 GPU 数组转回 CPU） ───
+    # ─── 示例推荐（打印时把 GPU 数组转回 CPU） ───
     print("\n>>> Top-10 推荐示例")
     df_user_out = data['user']
     df_recipe_out = data['recipe']
@@ -926,15 +882,8 @@ def main():
     id_pool = df_user_out[df_user_out['id'] > 1001000]['id'].tolist()
     demo_users = rng_py.sample(id_pool, min(10, len(id_pool)))
 
-    # 转回 CPU 以便用 pandas/numpy 打印
-    if _HAS_CUDA:
-        R_final_cpu = cp.asnumpy(R_final)
-        R_train_cpu = cp.asnumpy(R_train)
-    else:
-        R_final_cpu = R_final
-        R_train_cpu = R_train
-
-    import numpy as np
+    R_final_cpu = _to_cpu(R_final)
+    R_train_cpu = _to_cpu(R_train)
 
     for du in demo_users:
         if du not in uid2idx: continue
@@ -959,7 +908,7 @@ def main():
             if len(rr) == 0: continue
             cid = rr.iloc[0]['cuisine']
             cname = str(df_cuisine_out[df_cuisine_out['id'] == cid].iloc[0]['name']) \
-                if pd.notna(cid) and cid > 0 else '未知'
+                if (pd.notna(cid) and cid > 0) else '未知'
             print(f"       {rank+1:2d}. {str(rr.iloc[0]['name'])[:30]:30s} "
                   f"预测={R_final_cpu[u_idx, ri]:.1f}  [{cname}]")
 
