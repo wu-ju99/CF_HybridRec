@@ -592,8 +592,8 @@ class SVDRecommender:
                 qi_init = xp.concatenate([qi_init, pad], axis=1)
             self.q_i = (qi_init * 0.1).astype(xp.float32)
         else:
-            self.q_i = rng.normal(0, 0.1, (self.n_recipes, self.k)).astype(xp.float32)
-        self.p_u = rng.normal(0, 0.1, (self.n_users, self.k)).astype(xp.float32) * 0.1
+            self.q_i = _to_gpu(rng.normal(0, 0.1, (self.n_recipes, self.k)).astype(np.float32))
+        self.p_u = _to_gpu(rng.normal(0, 0.1, (self.n_users, self.k)).astype(np.float32)) * 0.1
 
         # 构建 (user, item, rating) 索引，CPU 上构造
         R_cpu = _to_cpu(R)
