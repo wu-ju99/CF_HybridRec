@@ -608,7 +608,7 @@ class SVDRecommender:
             tl = 0.0
             for start in range(0, N, bs):
                 b = pairs[start:start+bs]
-                bu = b[:, 0]; bi = b[:, 1]
+                bu = _to_gpu(b[:, 0]); bi = _to_gpu(b[:, 1])
                 br = _to_gpu(pair_ratings[start:start+bs])
                 pred = self.mu + self.b_u[bu] + self.b_i[bi] + \
                        xp.sum(self.p_u[bu] * self.q_i[bi], axis=1)
@@ -664,7 +664,7 @@ class TwoTowerRecommender:
             tl = 0.0
             for start in range(0, N, bs):
                 idx = order[start:start+bs]
-                bu = pairs[idx, 0]; bi = pairs[idx, 1]
+                bu = _to_gpu(pairs[idx, 0]); bi = _to_gpu(pairs[idx, 1])
                 br = _to_gpu(pair_ratings[idx])
                 Uu = U[bu]  # (B, du)
                 Vi = V[bi]  # (B, dv)
