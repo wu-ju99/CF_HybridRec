@@ -832,8 +832,9 @@ def main():
     R_train = R.copy()
     R_test = xp.full_like(R, xp.nan)
     rng = np.random.default_rng(42)
+    R_cpu_split = _to_cpu(R)
     for u in range(R.shape[0]):
-        rated = xp.where(~xp.isnan(R[u]))[0]
+        rated = np.where(~np.isnan(R_cpu_split[u]))[0]
         if len(rated) >= 3:
             t_items = rng.choice(rated, size=max(1, int(len(rated)*0.2)), replace=False)
             for i in t_items:
