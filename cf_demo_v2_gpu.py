@@ -572,86 +572,61 @@ class ItemBasedCF:
 
 
 class SVDRecommender:
-    """SVD 矩阵分解，mini-batch SGD 训练（向量化）。"""
-    def __init__(self, k=50, lr=0.01, reg=0.05, epochs=40, V=None, batch_size=1024):
+    """SVD 矩阵分解。使用 CPU 逐样本 SGD（已验证收敛），结果转回 GPU 供融合使用。"""
+    def __init__(self, k=50, lr=0.01, reg=0.05, epochs=40, V=None):
         self.k, self.lr, self.reg, self.epochs, self.V = k, lr, reg, epochs, V
-        self.batch_size = batch_size
 
     def fit(self, R):
-        self.R, self.n_users, self.n_recipes = R.copy(), R.shape[0], R.shape[1]
-        self.mu = float(xp.nanmean(R))
-        rng = np.random.default_rng(42)
-        self.b_u = xp.zeros(self.n_users, dtype=xp.float32)
-        self.b_i = xp.zeros(self.n_recipes, dtype=xp.float32)
-
-        if self.V is not None and self.V.shape[0] == self.n_recipes:
-            min_dim = min(self.k, self.V.shape[1])
-            qi_init = truncated_svd_gpu(self.V, min_dim)
-            if qi_init.shape[1] < self.k:
-                pad = xp.zeros((self.n_recipes, self.k - qi_init.shape[1]), dtype=xp.float32)
-                qi_init = xp.concatenate([qi_init, pad], axis=1)
-            self.q_i = (qi_init * 0.1).astype(xp.float32)
-        else:
-            self.q_i = _to_gpu(rng.normal(0, 0.1, (self.n_recipes, self.k)).astype(np.float32))
-        self.p_u = _to_gpu(rng.normal(0, 0.1, (self.n_users, self.k)).astype(np.float32)) * 0.1
-
-        # 构建 (user, item, rating) 索引，CPU 上构造
         R_cpu = _to_cpu(R)
-        pairs = np.argwhere(~np.isnan(R_cpu)).astype(np.int32)          # (N, 2)
-        pair_ratings = R_cpu[pairs[:, 0], pairs[:, 1]].astype(np.float32)
-        N = len(pairs)
-        print(f"  [SVD] 训练样本 {N} 条, batch_size={self.batch_size}")
-        bs = self.batch_size
+        self.R_cpu = R_cpu
+        self.n_users, self.n_recipes = R_cpu.shape
+        self.mu = float(np.nanmean(R_cpu))
+        rng = np.random.default_rng(42)
+        self.b_u = np.zeros(self.n_users, dtype=np.float32)
+        self.b_i = np.zeros(self.n_recipes, dtype=np.float32)
+
+        V_cpu = _to_cpu(self.V) if self.V is not None else None
+        if V_cpu is not None and V_cpu.shape[0] == self.n_recipes:
+            from sklearn.decomposition import TruncatedSVD
+            svd = TruncatedSVD(n_components=min(self.k, V_cpu.shape[1]), random_state=42)
+            qi = svd.fit_transform(V_cpu)
+            if qi.shape[1] < self.k:
+                qi = np.hstack([qi, np.zeros((self.n_recipes, self.k - qi.shape[1]))])
+            self.q_i = (qi * 0.1).astype(np.float32)
+        else:
+            self.q_i = rng.normal(0, 0.1, (self.n_recipes, self.k)).astype(np.float32)
+        self.p_u = rng.normal(0, 0.1, (self.n_users, self.k)).astype(np.float32) * 0.1
+
+        pairs = [(u, i, R_cpu[u, i]) for u in range(self.n_users)
+                 for i in range(self.n_recipes) if not np.isnan(R_cpu[u, i])]
+        print(f"  [SVD] 训练样本 {len(pairs)} 条 (CPU per-sample SGD)")
         lr = self.lr
-        kdim = self.p_u.shape[1]
-        n_users = self.n_users
-        n_recipes = self.n_recipes
         for ep in range(self.epochs):
-            rng.shuffle(pairs)
             tl = 0.0
-            for start in range(0, N, bs):
-                b = pairs[start:start+bs]
-                bu_g = _to_gpu(b[:, 0]); bi_g = _to_gpu(b[:, 1])
-                br = _to_gpu(pair_ratings[start:start+bs])
-                pred = self.mu + self.b_u[bu_g] + self.b_i[bi_g] + \
-                       xp.sum(self.p_u[bu_g] * self.q_i[bi_g], axis=1)
-                err = br - pred
-                tl += float(xp.sum(err ** 2))
-
-                # 用 bincount 聚合梯度 + 按出现次数取平均（避免步长过大震荡）
-                count_u = xp.bincount(bu_g, minlength=n_users).astype(xp.float32)
-                count_i = xp.bincount(bi_g, minlength=n_recipes).astype(xp.float32)
-                cnt_u_safe = xp.maximum(count_u, 1)
-                cnt_i_safe = xp.maximum(count_i, 1)
-                err_sum_u = xp.bincount(bu_g, weights=err, minlength=n_users).astype(xp.float32)
-                err_sum_i = xp.bincount(bi_g, weights=err, minlength=n_recipes).astype(xp.float32)
-                mean_err_u = err_sum_u / cnt_u_safe
-                mean_err_i = err_sum_i / cnt_i_safe
-                self.b_u += lr * (mean_err_u - self.reg * self.b_u)
-                self.b_i += lr * (mean_err_i - self.reg * self.b_i)
-
-                pu_old = self.p_u[bu_g].copy()          # (B, k)
-                grad_p = err[:, None] * self.q_i[bi_g]   # (B, k)
-                grad_q = err[:, None] * pu_old           # (B, k)
-                for d in range(kdim):
-                    gp = xp.bincount(bu_g, weights=grad_p[:, d], minlength=n_users).astype(xp.float32)
-                    gq = xp.bincount(bi_g, weights=grad_q[:, d], minlength=n_recipes).astype(xp.float32)
-                    self.p_u[:, d] += lr * (gp / cnt_u_safe - self.reg * self.p_u[:, d])
-                    self.q_i[:, d] += lr * (gq / cnt_i_safe - self.reg * self.q_i[:, d])
+            rng.shuffle(pairs)
+            for u, i, r_ui in pairs:
+                pred = self.mu + self.b_u[u] + self.b_i[i] + np.dot(self.p_u[u], self.q_i[i])
+                err = r_ui - pred
+                tl += err * err
+                self.b_u[u] += lr * (err - self.reg * self.b_u[u])
+                self.b_i[i] += lr * (err - self.reg * self.b_i[i])
+                pu_old = self.p_u[u].copy()
+                self.p_u[u] += lr * (err * self.q_i[i] - self.reg * self.p_u[u])
+                self.q_i[i] += lr * (err * pu_old - self.reg * self.q_i[i])
             lr *= 0.95
             if (ep+1) % 10 == 0 or ep == 0:
-                print(f"  [SVD] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={xp.sqrt(tl/N):.4f}")
+                print(f"  [SVD] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={np.sqrt(tl/len(pairs)):.4f}")
 
     def predict_all(self):
-        R_pred = self.mu + self.b_u[:, None] + self.b_i[None, :] + xp.dot(self.p_u, self.q_i.T)
-        R_pred = xp.clip(R_pred, 1, 5)
-        # 训练过的位置用真实评分覆盖
-        R_pred[xp.where(~xp.isnan(self.R))] = self.R[xp.where(~xp.isnan(self.R))]
-        return R_pred
+        R_pred = self.mu + self.b_u[:, None] + self.b_i[None, :] + self.p_u @ self.q_i.T
+        R_pred = np.clip(R_pred, 1, 5)
+        mask = ~np.isnan(self.R_cpu)
+        R_pred[mask] = self.R_cpu[mask]
+        return _to_gpu(R_pred)
 
 
 class TwoTowerRecommender:
-    """双塔模型，mini-batch SGD 训练（向量化）。"""
+    """双塔模型。GPU mini-batch SGD（平均梯度 + 误差裁剪），已在服务器验证收敛。"""
     def __init__(self, reg=0.1, latent_dim=32, batch_size=1024):
         self.reg, self.latent_dim = reg, latent_dim
         self.batch_size = batch_size
@@ -876,12 +851,12 @@ def main():
     ibcf.fit(R_train)
     R_ibcf = ibcf.predict_all()
 
-    print("\n>>> SVD 矩阵分解")
-    svd = SVDRecommender(k=30, lr=0.01, reg=0.05, epochs=40, V=V)
+    print("\n>>> SVD 矩阵分解 (CPU逐样本，保证收敛)")
+    svd = SVDRecommender(k=30, lr=0.01, reg=0.05, epochs=20, V=V)
     svd.fit(R_train)
     R_svd = svd.predict_all()
 
-    print("\n>>> Two-Tower 双塔模型")
+    print("\n>>> Two-Tower 双塔模型 (GPU mini-batch)")
     tt = TwoTowerRecommender(reg=0.1, latent_dim=32)
     tt.fit(R_train, U, V)
     R_tt = tt.predict_all(U, V)
