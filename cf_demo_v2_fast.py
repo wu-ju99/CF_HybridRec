@@ -694,7 +694,7 @@ def main():
     df_cuisine_out = data['cuisine']
     import random as _random
     id_pool = df_user_out[df_user_out['id'] > 1001000]['id'].tolist()
-    demo_users = _random.sample(id_pool, min(3, len(id_pool)))
+    demo_users = _random.sample(id_pool, min(5, len(id_pool)))
 
     for du in demo_users:
         if du not in uid2idx: continue

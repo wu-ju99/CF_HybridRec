@@ -13,8 +13,11 @@ CF-HybridRec 是一个基于协同过滤的混合菜谱推荐算法项目。它�
 - 动态置信度自适应融合权重
 - 离线评估体系（RMSE / MAE / Precision@K / Recall@K / NDCG@K / Coverage）
 - 新用户数据一键生成（1000 个多样化用户 + 差异化交互行为）
+- GPU 加速版（CuPy），SVD 走 CPU 逐样本保证收敛、其余模型 GPU 向量化
 
 完整算法设计见：[cf_algorithm_design.md](cf_algorithm_design.md)。
+
+完整技术路线与实验结果见：[技术路线与实验结果.md](技术路线与实验结果.md)。
 
 ## 1. 数据边界
 
@@ -153,27 +156,28 @@ python -c "import numpy; import pandas; import sklearn; print('numpy:', numpy.__
 
 ## 5. 快速开始
 
-### 5.1 使用增强版 SQLite 数据库运行
+### 5.1 使用增强版 SQLite 数据库运行（CPU）
 
 ```bash
 python cf_demo_v2.py
 ```
 
-输出包括：
+### 5.2 GPU 加速版（需要 NVIDIA GPU + CuPy）
 
-- 数据加载统计（每张表的行数和使用的字段）
-- 特征工程详情（U 和 V 的维度和来源）
-- 四模块训练进度
-- 离线评估指标（RMSE / MAE / Precision@20 / Recall@20 / NDCG@20 / Coverage）
-- Top-10 推荐示例
-
-修改 `cf_demo_v2.py` 第 28 行的 `DB_PATH` 可切换数据库：
-
-```python
-DB_PATH = r"C:\Users\HHP\Desktop\数据库v1(1)\数据库v1\dietrecommendation_v2_enhanced.sqlite"
+```bash
+pip install cupy-cuda11x  # 按 CUDA 版本选择
+python cf_demo_v2_gpu.py
 ```
 
-### 5.2 生成新用户数据
+GPU 版将 UserCF/ItemCF/HybridFusion 向量化到 GPU，TwoTower 用 GPU mini-batch（平均梯度+误差裁剪），SVD 走 CPU 逐样本 SGD 保证收敛。
+
+### 5.3 快速版（跳过 ItemCF，CPU 3-5 分钟）
+
+```bash
+python cf_demo_v2_fast.py
+```
+
+### 5.4 生成新用户数据
 
 ```bash
 python generate_new_users.py
@@ -181,7 +185,9 @@ python generate_new_users.py
 
 生成 1000 个多样化用户（8 种原型 × 口味变体），交互行为包含明显差异化模式（偏辣/偏淡/偏甜/偏荤/偏素等），并填充职业、出生地、工作地字段。
 
-### 5.3 查看用户交互详情
+> 提示：修改 `cf_demo_v2.py` 等脚本中的 `DB_PATH` 可切换数据库。
+
+### 5.5 查看用户交互详情
 
 ```bash
 python check_user_ids.py
@@ -212,9 +218,15 @@ Coverage        : 推荐覆盖的不同菜谱比例
 
 | 指标 | 原始库（500 用户，0.72%） | 增强库（1500 用户，19.9%） |
 |------|--------------------------|---------------------------|
-| SVD RMSE | 1.05 | **0.43** |
-| 用户间推荐区分度 | 差（Top-10 趋同） | 待测试 |
-| Coverage | 1.2% | 待测试 |
+| **RMSE** | 1.24 | **0.6223** |
+| **MAE** | 1.01 | **0.479** |
+| **Precision@20** | 0.0004 | **0.1116** |
+| **Recall@20** | 0.0036 | **0.2188** |
+| **NDCG@20** | 0.0018 | **0.1699** |
+| **Coverage** | 1.2% | **13.4%** |
+| 用户间推荐区分度 | 差（Top-10 趋同） | 好（画像差异化明显） |
+
+融合基础权重：`UBCF=0.10 IBCF=0.10 SVD=0.10 TwoTower=0.70`
 
 ### 6.3 消融实验
 
@@ -249,11 +261,14 @@ R_final = hf.predict_all(...)
 
 ```text
 D:\科研实习\代码\
-  cf_demo_v2.py               # 主程序：四模块混合推荐
+  cf_demo_v2.py               # 主程序：四模块混合推荐（CPU）
+  cf_demo_v2_gpu.py           # GPU 加速版（CuPy，CF/融合 GPU 向量化）
+  cf_demo_v2_fast.py          # 快速版（跳过 ItemCF，3-5 分钟）
   generate_new_users.py        # 新用户数据生成脚本
   check_user_ids.py            # 用户交互详情查看工具
   explore_schema.py            # 数据库结构探索工具
   cf_algorithm_design.md       # 完整算法设计文档
+  技术路线与实验结果.md         # 技术路线、调优历程、实验结果
   README.md                    # 本文件
 ```
 
@@ -261,17 +276,18 @@ D:\科研实习\代码\
 
 ### 8.1 已知局限
 
+- **数据生成规避率偏高**：`generate_new_users.py` 中部分原型 `avoid_rate=0.2`，生成大量 ~800 条 1 分规避记录，导致部分用户评分基线过低（建议调至 0.03 左右）
 - **ingredient2nature 表无数据**：菜谱食性特征 (nature_dim=10) 始终为均匀分布，当前不发挥作用
 - **无真实 rating**：`comment` 表没有评分字段，使用行为→评分映射，精度有限
-- **Two-Tower 收敛较慢**：在 122 万训练集上需要较多 epoch 才能稳定，已通过预计算 UA/VB 加速
+- **SVD 需走 CPU**：GPU mini-batch 下 SVD 不收敛，当前用 CPU 逐样本 SGD（收敛但较慢）
 - **合成数据仍非真实行为**：即使增强了多样性，合成数据的分布规律仍不能完全模拟真实用户
-- **HybridFusion 网格搜索较慢**：三层 for 循环遍历 125 种权重组合，在大数据集上耗时
 
 ### 8.2 后续改进方向
 
+- 修复数据生成规避率，生成更均衡的用户
 - 引入 BPR (Bayesian Personalized Ranking) 替代伪评分矩阵，直接用隐式反馈训练
 - 增加 MMR (Maximal Marginal Relevance) 多样性重排，缓解 popularity bias
 - Two-Tower 升级为双塔 DNN 或加入 LLM 语义 embedding
 - 引入时间衰减因子，近期交互权重更高
 - 规则层过滤接入 `hcirecommendrecipe`、`seasonrecommendingrecipe`、`sportrecommendrecipe` 等表
-- 使用 PyTorch 重写 SVD 和 Two-Tower 训练部分，支持 GPU 加速
+- 使用 PyTorch 重写训练部分，真正利用 GPU 加速 SVD
