@@ -603,22 +603,41 @@ class SVDRecommender:
         print(f"  [SVD] 训练样本 {N} 条, batch_size={self.batch_size}")
         bs = self.batch_size
         lr = self.lr
+        kdim = self.p_u.shape[1]
+        n_users = self.n_users
+        n_recipes = self.n_recipes
         for ep in range(self.epochs):
             rng.shuffle(pairs)
             tl = 0.0
             for start in range(0, N, bs):
                 b = pairs[start:start+bs]
-                bu = _to_gpu(b[:, 0]); bi = _to_gpu(b[:, 1])
+                bu_g = _to_gpu(b[:, 0]); bi_g = _to_gpu(b[:, 1])
                 br = _to_gpu(pair_ratings[start:start+bs])
-                pred = self.mu + self.b_u[bu] + self.b_i[bi] + \
-                       xp.sum(self.p_u[bu] * self.q_i[bi], axis=1)
+                pred = self.mu + self.b_u[bu_g] + self.b_i[bi_g] + \
+                       xp.sum(self.p_u[bu_g] * self.q_i[bi_g], axis=1)
                 err = br - pred
                 tl += float(xp.sum(err ** 2))
-                pu_old = self.p_u[bu].copy()
-                xp.add.at(self.b_u, bu, lr * (err - self.reg * self.b_u[bu]))
-                xp.add.at(self.b_i, bi, lr * (err - self.reg * self.b_i[bi]))
-                xp.add.at(self.p_u, bu, lr * (err[:, None] * self.q_i[bi] - self.reg * pu_old))
-                xp.add.at(self.q_i, bi, lr * (err[:, None] * pu_old - self.reg * self.q_i[bi]))
+
+                # 用 bincount 聚合梯度 + 按出现次数取平均（避免步长过大震荡）
+                count_u = xp.bincount(bu_g, minlength=n_users).astype(xp.float32)
+                count_i = xp.bincount(bi_g, minlength=n_recipes).astype(xp.float32)
+                cnt_u_safe = xp.maximum(count_u, 1)
+                cnt_i_safe = xp.maximum(count_i, 1)
+                err_sum_u = xp.bincount(bu_g, weights=err, minlength=n_users).astype(xp.float32)
+                err_sum_i = xp.bincount(bi_g, weights=err, minlength=n_recipes).astype(xp.float32)
+                mean_err_u = err_sum_u / cnt_u_safe
+                mean_err_i = err_sum_i / cnt_i_safe
+                self.b_u += lr * (mean_err_u - self.reg * self.b_u)
+                self.b_i += lr * (mean_err_i - self.reg * self.b_i)
+
+                pu_old = self.p_u[bu_g].copy()          # (B, k)
+                grad_p = err[:, None] * self.q_i[bi_g]   # (B, k)
+                grad_q = err[:, None] * pu_old           # (B, k)
+                for d in range(kdim):
+                    gp = xp.bincount(bu_g, weights=grad_p[:, d], minlength=n_users).astype(xp.float32)
+                    gq = xp.bincount(bi_g, weights=grad_q[:, d], minlength=n_recipes).astype(xp.float32)
+                    self.p_u[:, d] += lr * (gp / cnt_u_safe - self.reg * self.p_u[:, d])
+                    self.q_i[:, d] += lr * (gq / cnt_i_safe - self.reg * self.q_i[:, d])
             lr *= 0.95
             if (ep+1) % 10 == 0 or ep == 0:
                 print(f"  [SVD] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={xp.sqrt(tl/N):.4f}")
@@ -666,19 +685,24 @@ class TwoTowerRecommender:
                 idx = order[start:start+bs]
                 bu = _to_gpu(pairs[idx, 0]); bi = _to_gpu(pairs[idx, 1])
                 br = _to_gpu(pair_ratings[idx])
+                Bsz = len(idx)                      # 实际 batch 大小
                 Uu = U[bu]  # (B, du)
                 Vi = V[bi]  # (B, dv)
                 up = Uu @ self.A  # (B, k)
                 vp = Vi @ self.B  # (B, k)
                 pred = self.mu + Uu @ self.w_u + Vi @ self.w_v + xp.sum(up * vp, axis=1)
-                err = br - pred
-                tl += float(xp.sum(err ** 2))
-                # 线性项梯度
-                self.w_u += lr * (xp.sum(err[:, None] * Uu, axis=0) - reg * self.w_u)
-                self.w_v += lr * (xp.sum(err[:, None] * Vi, axis=0) - reg * self.w_v)
-                # 交互矩阵梯度（批量外积之和）
-                self.A += lr * (xp.sum(Uu[:, :, None] * err[:, None, None] * vp[:, None, :], axis=0) - reg * self.A)
-                self.B += lr * (xp.sum(Vi[:, :, None] * err[:, None, None] * up[:, None, :], axis=0) - reg * self.B)
+                err_raw = br - pred
+                tl += float(xp.sum(err_raw ** 2))
+                err = xp.clip(err_raw, -3.0, 3.0)   # 裁剪误差，防止梯度爆炸
+                # 平均梯度（除以 batch 大小），避免求和梯度过大
+                g_wu = (xp.sum(err[:, None] * Uu, axis=0) - reg * self.w_u * Bsz) / Bsz
+                g_wv = (xp.sum(err[:, None] * Vi, axis=0) - reg * self.w_v * Bsz) / Bsz
+                g_A = (xp.sum(Uu[:, :, None] * err[:, None, None] * vp[:, None, :], axis=0) - reg * self.A * Bsz) / Bsz
+                g_B = (xp.sum(Vi[:, :, None] * err[:, None, None] * up[:, None, :], axis=0) - reg * self.B * Bsz) / Bsz
+                self.w_u += lr * g_wu
+                self.w_v += lr * g_wv
+                self.A += lr * g_A
+                self.B += lr * g_B
             lr *= 0.95
             if (ep+1) % 10 == 0 or ep == 0:
                 print(f"  [TwoTower] Epoch {ep+1:3d}/40 RMSE(train)={xp.sqrt(tl/max(N,1)):.4f}")
