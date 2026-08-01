@@ -572,7 +572,13 @@ class ItemBasedCF:
 
 
 class SVDRecommender:
-    """SVD 矩阵分解。使用 CPU 逐样本 SGD（已验证收敛），结果转回 GPU 供融合使用。"""
+    """SVD++ 矩阵分解（含隐式反馈因子 y_j）。
+
+    与设计文档一致：
+      R̂_ui = μ + b_u + b_i + q_iᵀ (p_u + |N(u)|^{-0.5} Σ_{j∈N(u)} y_j)
+    其中 N(u) 是用户 u 在训练集中交互过的物品集合，y_j 是物品 j 的隐式因子向量。
+    CPU 逐样本 SGD；y_j 采用 epoch 末批量更新（稀疏矩阵乘法加速）。
+    """
     def __init__(self, k=50, lr=0.01, reg=0.05, epochs=40, V=None):
         self.k, self.lr, self.reg, self.epochs, self.V = k, lr, reg, epochs, V
 
@@ -596,29 +602,48 @@ class SVDRecommender:
         else:
             self.q_i = rng.normal(0, 0.1, (self.n_recipes, self.k)).astype(np.float32)
         self.p_u = rng.normal(0, 0.1, (self.n_users, self.k)).astype(np.float32) * 0.1
+        # SVD++ 隐式因子向量 y_j
+        self.y_j = rng.normal(0, 0.05, (self.n_recipes, self.k)).astype(np.float32)
+
+        # 隐式集合 N(u)：训练集中用户交互过的物品
+        mask = ~np.isnan(R_cpu)                      # (n_users, n_recipes) bool
+        self.mask_f = mask.astype(np.float32)         # 缓存 float 版
+        n_imp = mask.sum(axis=1)                      # |N(u)|
+        self.imp_scale = np.where(n_imp > 0,
+                                  np.power(n_imp.astype(np.float64), -0.5), 0).astype(np.float32)
+        self.count_imp = mask.sum(axis=0).astype(np.float32)   # 物品被交互的用户数
+        self.imp_sum = self.mask_f @ self.y_j         # Σ_{j∈N(u)} y_j
 
         pairs = [(u, i, R_cpu[u, i]) for u in range(self.n_users)
                  for i in range(self.n_recipes) if not np.isnan(R_cpu[u, i])]
-        print(f"  [SVD] 训练样本 {len(pairs)} 条 (CPU per-sample SGD)")
+        print(f"  [SVD++] 训练样本 {len(pairs)} 条 (CPU per-sample SGD, 含隐式因子)")
+        kdim = self.k
         lr = self.lr
         for ep in range(self.epochs):
             tl = 0.0
             rng.shuffle(pairs)
+            G = np.zeros((self.n_users, kdim), dtype=np.float32)   # 累积 y_j 梯度
             for u, i, r_ui in pairs:
-                pred = self.mu + self.b_u[u] + self.b_i[i] + np.dot(self.p_u[u], self.q_i[i])
+                aug = self.p_u[u] + self.imp_scale[u] * self.imp_sum[u]   # 增强用户向量
+                pred = self.mu + self.b_u[u] + self.b_i[i] + np.dot(self.q_i[i], aug)
                 err = r_ui - pred
                 tl += err * err
                 self.b_u[u] += lr * (err - self.reg * self.b_u[u])
                 self.b_i[i] += lr * (err - self.reg * self.b_i[i])
-                pu_old = self.p_u[u].copy()
                 self.p_u[u] += lr * (err * self.q_i[i] - self.reg * self.p_u[u])
-                self.q_i[i] += lr * (err * pu_old - self.reg * self.q_i[i])
+                G[u] += err * self.q_i[i]                             # 用更新前的 q_i
+                self.q_i[i] += lr * (err * aug - self.reg * self.q_i[i])  # q_i 用增强向量
+            # epoch 末批量更新 y_j：Σ_{u:j∈N(u)} s_u * err * q_i
+            y_grad = self.mask_f.T @ (self.imp_scale[:, None] * G)   # (n_items, k)
+            self.y_j += lr * (y_grad - self.reg * self.count_imp[:, None] * self.y_j)
+            self.imp_sum = self.mask_f @ self.y_j                     # 重算隐式聚合
             lr *= 0.95
             if (ep+1) % 10 == 0 or ep == 0:
-                print(f"  [SVD] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={np.sqrt(tl/len(pairs)):.4f}")
+                print(f"  [SVD++] Epoch {ep+1:3d}/{self.epochs} RMSE(train)={np.sqrt(tl/len(pairs)):.4f}")
 
     def predict_all(self):
-        R_pred = self.mu + self.b_u[:, None] + self.b_i[None, :] + self.p_u @ self.q_i.T
+        aug_p = self.p_u + self.imp_scale[:, None] * self.imp_sum    # (n_users, k)
+        R_pred = self.mu + self.b_u[:, None] + self.b_i[None, :] + aug_p @ self.q_i.T
         R_pred = np.clip(R_pred, 1, 5)
         mask = ~np.isnan(self.R_cpu)
         R_pred[mask] = self.R_cpu[mask]
@@ -851,7 +876,7 @@ def main():
     ibcf.fit(R_train)
     R_ibcf = ibcf.predict_all()
 
-    print("\n>>> SVD 矩阵分解 (CPU逐样本，保证收敛)")
+    print("\n>>> SVD++ 矩阵分解 (CPU逐样本 + 隐式因子，保证收敛)")
     svd = SVDRecommender(k=30, lr=0.01, reg=0.05, epochs=20, V=V)
     svd.fit(R_train)
     R_svd = svd.predict_all()

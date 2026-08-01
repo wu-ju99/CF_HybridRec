@@ -83,16 +83,19 @@ SQLite 数据库 (187 tables)
 
 融合公式：
 
-```
-R̂_final = w₁·R̂_UBCF + w₂·R̂_IBCF + w₃·R̂_SVD + w₄·R̂_TwoTower
+$$\hat{R}_{final} = w_1 \hat{R}_{UBCF} + w_2 \hat{R}_{IBCF} + w_3 \hat{R}_{SVD} + w_4 \hat{R}_{TwoTower}$$
 
-其中 wₖ 通过网格搜索 + 置信度自适应确定：
-wₖ'(c_u, c_i) = wₖ_base · φₖ(c_u, c_i)
-φ₁ = c_u·(1-c_i) + 0.5    (UserCF 在用户密集、菜谱稀疏时权重高)
-φ₂ = (1-c_u)·c_i + 0.5    (ItemCF 在用户稀疏、菜谱密集时权重高)
-φ₃ = c_u·c_i + 0.3         (SVD 在两者都密集时权重高)
-φ₄ = (1-c_u)·(1-c_i) + 0.3 (Two-Tower 在两者都稀疏时兜底)
-```
+其中 $w_k$ 通过网格搜索 + 置信度自适应确定：
+
+$$w_k'(c_u, c_i) = w_k^{base} \cdot \phi_k(c_u, c_i)$$
+
+$$\phi_1 = c_u(1-c_i) + 0.5 \quad (\text{UserCF 在用户密集、菜谱稀疏时权重高})$$
+
+$$\phi_2 = (1-c_u)c_i + 0.5 \quad (\text{ItemCF 在用户稀疏、菜谱密集时权重高})$$
+
+$$\phi_3 = c_u c_i + 0.3 \quad (\text{SVD 在两者都密集时权重高})$$
+
+$$\phi_4 = (1-c_u)(1-c_i) + 0.3 \quad (\text{Two-Tower 在两者都稀疏时兜底})$$
 
 ## 3. 主要使用的数据表与特征映射
 
