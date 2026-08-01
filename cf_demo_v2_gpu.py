@@ -611,7 +611,8 @@ class SVDRecommender:
         n_imp = mask.sum(axis=1)                      # |N(u)|
         self.imp_scale = np.where(n_imp > 0,
                                   np.power(n_imp.astype(np.float64), -0.5), 0).astype(np.float32)
-        self.count_imp = mask.sum(axis=0).astype(np.float32)   # 物品被交互的用户数
+        n_edges = self.mask_f.T @ n_imp               # 每物品的交互"边数" = Σ_{u:j∈N(u)} |N(u)|
+        self.n_edges = np.maximum(n_edges, 1e-9).astype(np.float32)
         self.imp_sum = self.mask_f @ self.y_j         # Σ_{j∈N(u)} y_j
 
         pairs = [(u, i, R_cpu[u, i]) for u in range(self.n_users)
@@ -619,6 +620,7 @@ class SVDRecommender:
         print(f"  [SVD++] 训练样本 {len(pairs)} 条 (CPU per-sample SGD, 含隐式因子)")
         kdim = self.k
         lr = self.lr
+        alpha = 0.2                                   # y_j 松弛系数（向平衡点平滑收敛）
         for ep in range(self.epochs):
             tl = 0.0
             rng.shuffle(pairs)
@@ -633,9 +635,10 @@ class SVDRecommender:
                 self.p_u[u] += lr * (err * self.q_i[i] - self.reg * self.p_u[u])
                 G[u] += err * self.q_i[i]                             # 用更新前的 q_i
                 self.q_i[i] += lr * (err * aug - self.reg * self.q_i[i])  # q_i 用增强向量
-            # epoch 末批量更新 y_j：Σ_{u:j∈N(u)} s_u * err * q_i
+            # epoch 末向平衡点松弛更新 y_j（避免一次性大步求和导致发散）
             y_grad = self.mask_f.T @ (self.imp_scale[:, None] * G)   # (n_items, k)
-            self.y_j += lr * (y_grad - self.reg * self.count_imp[:, None] * self.y_j)
+            y_star = np.clip(y_grad / (self.reg * self.n_edges[:, None]), -5.0, 5.0)
+            self.y_j += alpha * (y_star - self.y_j)
             self.imp_sum = self.mask_f @ self.y_j                     # 重算隐式聚合
             lr *= 0.95
             if (ep+1) % 10 == 0 or ep == 0:
