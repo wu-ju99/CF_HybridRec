@@ -23,15 +23,19 @@
 来源表及其角色：
 
 ```
-comment (rating)  ────────────┐
-useracutalrecipe (user,recipe)──→  用户-菜谱评分矩阵 R ∈ ℝ^(m×n)
-userbrowse (浏览记录)  ───────┘      m = 用户数, n = 菜谱数
+useracutalrecipe (实际做过)  ──┐
+userfondnessrecipe (喜好)  ────┼──→  用户-菜谱评分矩阵 R ∈ ℝ^(m×n)
+userbrowse (浏览记录)  ────────┤      m = 用户数, n = 菜谱数
+useravoidrecipe (规避)  ───────┘
 ```
 
+> 注：`comment` 表经数据库审计确认**没有 rating 字段**，因此评分矩阵由上述 4 种行为信号构造伪评分。
+
 **评分构造方式：**
-- `comment` 表有 rating 时，直接使用（1-5 分）
-- `useracutalrecipe` 有记录但无 rating 时，视为隐式反馈（r=3，中性默认）
-- `userbrowse` 记录作为弱隐式反馈（r=2，表示有关注但未实际制作）
+- `useracutalrecipe`（实际做过）→ r = **5.0**（强正向）
+- `userfondnessrecipe`（标记喜好）→ r = **3.0 + intensity×0.4**（正向，intensity 越大越喜欢）
+- `userbrowse`（浏览记录）→ r = **2.5**（弱正向，关注但未制作）
+- `useravoidrecipe`（标记规避）→ r = **1.0**（负向）
 
 ### 1.2 用户特征向量 Uᵢ
 
@@ -132,12 +136,15 @@ $$\mathbf{v}_j = [\text{OneHot}(cuisine) \;|\; gi_{norm} \;|\; t_{norm} \;|\; co
 $$
 R_{ui} = 
 \begin{cases}
-\text{comment.rating} & \text{如果用户 u 评价了菜谱 i} \\
-3 & \text{如果用户 u 制作了但未评价 (来自 useracutalrecipe)} \\
-2 & \text{如果用户 u 仅浏览过 (来自 userbrowse)} \\
+5.0 & \text{用户 u 实际做过菜谱 i（来自 useracutalrecipe）} \\
+3.0 + intensity \times 0.4 & \text{用户 u 标记喜好菜谱 i（来自 userfondnessrecipe）} \\
+2.5 & \text{用户 u 仅浏览过菜谱 i（来自 userbrowse）} \\
+1.0 & \text{用户 u 标记规避菜谱 i（来自 useravoidrecipe）} \\
 \emptyset & \text{其他情况（待预测）}
 \end{cases}
 $$
+
+其中 $intensity$ 是 `userfondnessrecipe.intensity` 的取值（1-5），经 $\min(5.0,\; 3.0 + intensity \times 0.4)$ 截断后作为评分。
 
 ### 3.2 基于用户的协同过滤 (User-Based CF)
 
