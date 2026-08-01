@@ -203,7 +203,7 @@ $$\hat{R}_{ui}^{IBCF} = \frac{\sum_{j \in N_k(i)} sim_{item}(i,j) \cdot R_{uj}}{
 
 $$\mathbf{R} \approx \mathbf{P} \mathbf{Q}^T$$
 
-其中 $\mathbf{P} \in \mathbb{R}^{m \times k}$ 是用户潜在因子矩阵，  $\mathbf{Q} \in \mathbb{R}^{n \times k}$   是菜谱潜在因子矩阵，$k$ 是因子维度。
+其中 $\mathbf{P} \in \mathbb{R}^{m \times k}$ 是用户潜在因子矩阵，  $\mathbf{Q} \in \mathbb{R}^{n \times k}$   是菜谱潜在因子矩阵， $k$  是因子维度。
 
 单个评分的预测：
 
@@ -230,7 +230,7 @@ $$\hat{R}_{ui}^{SVD++} = \mu + b_u + b_i + \mathbf{q}_i^T \left( \mathbf{p}_u + 
 
 $$\mathbf{q}_i^{(0)} = \mathbf{W} \cdot \mathbf{v}_i$$
 
-其中 $\mathbf{W} \in \mathbb{R}^{k \times d_v}$ 是可学习的映射矩阵，$\mathbf{v}_i$ 是菜谱 i 的内容特征向量。
+其中 $\mathbf{W} \in \mathbb{R}^{k \times d_v}$ 是可学习的映射矩阵， $\mathbf{v}_i$  是菜谱 i 的内容特征向量。
 
 ### 4.4 损失函数
 
