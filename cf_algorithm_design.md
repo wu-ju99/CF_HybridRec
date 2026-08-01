@@ -46,7 +46,7 @@ userbrowse (浏览记录)  ───────┘      m = 用户数, n = 菜�
 | `userbirthplace` → `address.id` | 出生地域 | 取省级行政区 One-hot | N_prov |
 | `userworkplace` → `address.id` | 工作地域 | 取省级行政区 One-hot | N_prov |
 
-**用户特征向量维度：  ** d_u = 3 + 6 + N_occ + 5 + 2×N_prov
+**用户特征向量维度：** d_u = 3 + 6 + N_occ + 5 + 2×N_prov
 
 ### 1.3 菜谱特征向量 Vⱼ
 
@@ -63,7 +63,7 @@ userbrowse (浏览记录)  ───────┘      m = 用户数, n = 菜�
 | `cookstep` → `cookmethod` | 烹饪方式 | 多热编码分布 | N_cookmethod |
 | `classifcationavoidrecipe` / `diseaseavoidrecipe` 等 | 避忌标签 | 多热编码 | N_avoid_tags |
 
-**菜谱特征向量维度：  ** d_v = N_cuisine + 3 + N_foodtype + 5 + N_nature + 7 + N_cookmethod + N_avoid_tags
+**菜谱特征向量维度：** d_v = N_cuisine + 3 + N_foodtype + 5 + N_nature + 7 + N_cookmethod + N_avoid_tags
 
 ---
 
