@@ -93,7 +93,7 @@ $$\text{OneHot}(c) = [0,0,...,1,...,0] \in \{0,1\}^{|C|}$$
 
 $$\vec{v}_{taste}^{(j)} = \frac{1}{|I_j|} \sum_{k \in I_j} \vec{t}_{ik}$$
 
-其中 $I_j$ 是菜谱 j 的食材集合，$\vec{t}_{ik}$ 是食材 k 的口味向量（5维，每维取 intensity 归一化值）。
+其中 $I_j$ 是菜谱 j 的食材集合， $\vec{t}_{ik}$  是食材 k 的口味向量（5维，每维取 intensity 归一化值）。
 
 ### 2.4 食材类型 TF-IDF 加权
 
