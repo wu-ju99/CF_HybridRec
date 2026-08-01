@@ -303,7 +303,7 @@ $$\hat{R}_{ui}^{final} = w_1 \hat{R}_{ui}^{UBCF} + w_2 \hat{R}_{ui}^{IBCF} + w_3
 
 $$c_u = 1 - e^{-\gamma_u \cdot n_u}$$
 
-其中 $n_u$ 是用户 u 的总交互数，$\gamma_u$ 是衰减速率（建议 0.1）。
+其中 $n_u$ 是用户 u 的总交互数， $\gamma_u$ 是衰减速率（建议 0.1）。
 
 **菜谱端置信度：**
 
