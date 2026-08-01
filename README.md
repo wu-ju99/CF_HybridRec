@@ -9,7 +9,7 @@ CF-HybridRec 是一个基于协同过滤的混合菜谱推荐算法项目。它�
 - User-Based CF（评分相似度 + 画像相似度自适应融合）
 - Item-Based CF（共现相似度 + 内容相似度自适应融合）
 - SVD 矩阵分解（SGD 优化，菜谱因子用内容特征初始化）
-- Two-Tower 双塔模型（$R̂_{ui}=μ+w_u^T U_u+w_v^T V_i+(A^T U_u)^T(B^T V_i)$，用户塔 + 物品塔）
+- Two-Tower 双塔模型（ $R̂_{ui}=μ+w_u^T U_u+w_v^T V_i+(A^T U_u)^T(B^T V_i)$ ，用户塔 + 物品塔）
 - 动态置信度自适应融合权重
 - 离线评估体系（RMSE / MAE / Precision@K / Recall@K / NDCG@K / Coverage）
 - 新用户数据一键生成（1000 个多样化用户 + 差异化交互行为）
