@@ -222,7 +222,7 @@ $$\hat{R}_{ui}^{SVD} = \mu + b_u + b_i + \mathbf{p}_u^T \mathbf{q}_i$$
 
 $$\hat{R}_{ui}^{SVD++} = \mu + b_u + b_i + \mathbf{q}_i^T \left( \mathbf{p}_u + |N(u)|^{-0.5} \sum_{j \in N(u)} \mathbf{y}_j \right)$$
 
-其中 $N(u)$ 是用户 u 有过隐式反馈的菜谱集合（来自 `useracutalrecipe` 或 `userbrowse`），$\mathbf{y}_j$ 是菜谱 j 的隐式因子向量。
+其中 $N(u)$ 是用户 u 有过隐式反馈的菜谱集合（来自 `useracutalrecipe` 或 `userbrowse`）， $\mathbf{y}_j$  是菜谱 j 的隐式因子向量。
 
 ### 4.3 融入内容特征的 SVD++
 
