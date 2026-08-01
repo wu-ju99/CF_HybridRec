@@ -187,7 +187,7 @@ $$sim_{content}(i, j) = \frac{\mathbf{v}_i \cdot \mathbf{v}_j}{\|\mathbf{v}_i\| 
 
 $$sim_{item}(i, j) = \beta \cdot sim_{co}(i, j) + (1-\beta) \cdot sim_{content}(i, j)$$
 
-同样使用置信度衰减：$\beta_{eff} = \beta \cdot \min(1, |U_{ij}| / \tau_{min})$
+同样使用置信度衰减：  $\beta_{eff} = \beta \cdot \min(1, |U_{ij}| / \tau_{min})$
 
 **Step 2：评分预测**
 
