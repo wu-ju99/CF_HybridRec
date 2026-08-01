@@ -93,7 +93,7 @@ $$\text{OneHot}(c) = [0,0,...,1,...,0] \in \{0,1\}^{|C|}$$
 
 $$\vec{v}_{taste}^{(j)} = \frac{1}{|I_j|} \sum_{k \in I_j} \vec{t}_{ik}$$
 
-其中 $I_j$ 是菜谱 j 的食材集合，$\vec{t}_{ik}$ 是食材 k 的口味向量（5维，每维取 intensity 归一化值）。
+其中 $I_j$ 是菜谱 j 的食材集合， $\vec{t}_{ik}$  是食材 k 的口味向量（5维，每维取 intensity 归一化值）。
 
 ### 2.4 食材类型 TF-IDF 加权
 
@@ -187,7 +187,7 @@ $$sim_{content}(i, j) = \frac{\mathbf{v}_i \cdot \mathbf{v}_j}{\|\mathbf{v}_i\| 
 
 $$sim_{item}(i, j) = \beta \cdot sim_{co}(i, j) + (1-\beta) \cdot sim_{content}(i, j)$$
 
-同样使用置信度衰减：$\beta_{eff} = \beta \cdot \min(1, |U_{ij}| / \tau_{min})$
+同样使用置信度衰减：  $\beta_{eff} = \beta \cdot \min(1, |U_{ij}| / \tau_{min})$
 
 **Step 2：评分预测**
 
@@ -203,7 +203,7 @@ $$\hat{R}_{ui}^{IBCF} = \frac{\sum_{j \in N_k(i)} sim_{item}(i,j) \cdot R_{uj}}{
 
 $$\mathbf{R} \approx \mathbf{P} \mathbf{Q}^T$$
 
-其中 $\mathbf{P} \in \mathbb{R}^{m \times k}$ 是用户潜在因子矩阵，$\mathbf{Q} \in \mathbb{R}^{n \times k}$ 是菜谱潜在因子矩阵，$k$ 是因子维度。
+其中 $\mathbf{P} \in \mathbb{R}^{m \times k}$ 是用户潜在因子矩阵，  $\mathbf{Q} \in \mathbb{R}^{n \times k}$   是菜谱潜在因子矩阵， $k$  是因子维度。
 
 单个评分的预测：
 
@@ -222,7 +222,7 @@ $$\hat{R}_{ui}^{SVD} = \mu + b_u + b_i + \mathbf{p}_u^T \mathbf{q}_i$$
 
 $$\hat{R}_{ui}^{SVD++} = \mu + b_u + b_i + \mathbf{q}_i^T \left( \mathbf{p}_u + |N(u)|^{-0.5} \sum_{j \in N(u)} \mathbf{y}_j \right)$$
 
-其中 $N(u)$ 是用户 u 有过隐式反馈的菜谱集合（来自 `useracutalrecipe` 或 `userbrowse`），$\mathbf{y}_j$ 是菜谱 j 的隐式因子向量。
+其中 $N(u)$ 是用户 u 有过隐式反馈的菜谱集合（来自 `useracutalrecipe` 或 `userbrowse`）， $\mathbf{y}_j$  是菜谱 j 的隐式因子向量。
 
 ### 4.3 融入内容特征的 SVD++
 
@@ -230,13 +230,13 @@ $$\hat{R}_{ui}^{SVD++} = \mu + b_u + b_i + \mathbf{q}_i^T \left( \mathbf{p}_u + 
 
 $$\mathbf{q}_i^{(0)} = \mathbf{W} \cdot \mathbf{v}_i$$
 
-其中 $\mathbf{W} \in \mathbb{R}^{k \times d_v}$ 是可学习的映射矩阵，$\mathbf{v}_i$ 是菜谱 i 的内容特征向量。
+其中 $\mathbf{W} \in \mathbb{R}^{k \times d_v}$ 是可学习的映射矩阵， $\mathbf{v}_i$  是菜谱 i 的内容特征向量。
 
 ### 4.4 损失函数
 
 $$\mathcal{L} = \sum_{(u,i) \in \mathcal{D}_{train}} (R_{ui} - \hat{R}_{ui})^2 + \lambda \left( \sum_u \|\mathbf{p}_u\|^2 + \sum_i \|\mathbf{q}_i\|^2 + \sum_u b_u^2 + \sum_i b_i^2 + \sum_{j \in N(\cdot)} \|\mathbf{y}_j\|^2 + \|\mathbf{W}\|_F^2 \right)$$
 
-其中 $\lambda$ 是正则化系数，$\|\cdot\|_F$ 是 Frobenius 范数。
+其中 $\lambda$ 是正则化系数， $\|\cdot\|_F$  是 Frobenius 范数。
 
 ### 4.5 参数更新（随机梯度下降 SGD）
 
@@ -255,7 +255,7 @@ q_i ← q_i + η * (e_ui * (p_u + Σy_j)   - λ * q_i)
     y_j ← y_j + η * (e_ui * |N(u)|^{-0.5} * q_i - λ * y_j)
 ```
 
-其中 $\eta$ 是学习率，使用指数衰减：$\eta_t = \eta_0 \cdot \gamma^{t/T}$。
+其中 $\eta$ 是学习率，使用指数衰减： $\eta_t = \eta_0 \cdot \gamma^{t/T}$ 。
 
 ---
 
@@ -267,7 +267,7 @@ q_i ← q_i + η * (e_ui * (p_u + Σy_j)   - λ * q_i)
 
 $$\hat{R}_{ui}^{content} = \sigma\left( f_u(\mathbf{u}_i) \cdot f_v(\mathbf{v}_j) \right)$$
 
-其中 $f_u$ 和 $f_v$ 是小型全连接网络（各 2-3 层），将用户和菜谱特征映射到同一 k 维空间后做内积。$\sigma$ 将值映射到 [1, 5]。
+其中 $f_u$ 和 $f_v$ 是小型全连接网络（各 2-3 层），将用户和菜谱特征映射到同一 k 维空间后做内积。 $\sigma$  将值映射到 [1, 5]。
 
 简单版（线性，可解释性强）：
 
@@ -293,7 +293,7 @@ $$\hat{R}_{ui}^{cold\_content} = \frac{\sum_{j \in H(u)} sim_{content}(i, j) \cd
 
 $$\hat{R}_{ui}^{final} = w_1 \hat{R}_{ui}^{UBCF} + w_2 \hat{R}_{ui}^{IBCF} + w_3 \hat{R}_{ui}^{SVD++} + w_4 \hat{R}_{ui}^{content}$$
 
-约束：$\sum_{k=1}^4 w_k = 1, \quad w_k \geq 0$
+约束： $\sum_{k=1}^4 w_k = 1, \quad w_k \geq 0$ 
 
 ### 6.2 动态权重（置信度自适应）
 
@@ -303,7 +303,7 @@ $$\hat{R}_{ui}^{final} = w_1 \hat{R}_{ui}^{UBCF} + w_2 \hat{R}_{ui}^{IBCF} + w_3
 
 $$c_u = 1 - e^{-\gamma_u \cdot n_u}$$
 
-其中 $n_u$ 是用户 u 的总交互数，$\gamma_u$ 是衰减速率（建议 0.1）。
+其中 $n_u$ 是用户 u 的总交互数， $\gamma_u$ 是衰减速率（建议 0.1）。
 
 **菜谱端置信度：**
 
