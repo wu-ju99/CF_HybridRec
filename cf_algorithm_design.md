@@ -236,7 +236,7 @@ $$\mathbf{q}_i^{(0)} = \mathbf{W} \cdot \mathbf{v}_i$$
 
 $$\mathcal{L} = \sum_{(u,i) \in \mathcal{D}_{train}} (R_{ui} - \hat{R}_{ui})^2 + \lambda \left( \sum_u \|\mathbf{p}_u\|^2 + \sum_i \|\mathbf{q}_i\|^2 + \sum_u b_u^2 + \sum_i b_i^2 + \sum_{j \in N(\cdot)} \|\mathbf{y}_j\|^2 + \|\mathbf{W}\|_F^2 \right)$$
 
-其中 $\lambda$ 是正则化系数，$\|\cdot\|_F$ 是 Frobenius 范数。
+其中 $\lambda$ 是正则化系数， $\|\cdot\|_F$  是 Frobenius 范数。
 
 ### 4.5 参数更新（随机梯度下降 SGD）
 
@@ -255,7 +255,7 @@ q_i ← q_i + η * (e_ui * (p_u + Σy_j)   - λ * q_i)
     y_j ← y_j + η * (e_ui * |N(u)|^{-0.5} * q_i - λ * y_j)
 ```
 
-其中 $\eta$ 是学习率，使用指数衰减：$\eta_t = \eta_0 \cdot \gamma^{t/T}$。
+其中 $\eta$ 是学习率，使用指数衰减： $\eta_t = \eta_0 \cdot \gamma^{t/T}$ 。
 
 ---
 
@@ -267,7 +267,7 @@ q_i ← q_i + η * (e_ui * (p_u + Σy_j)   - λ * q_i)
 
 $$\hat{R}_{ui}^{content} = \sigma\left( f_u(\mathbf{u}_i) \cdot f_v(\mathbf{v}_j) \right)$$
 
-其中 $f_u$ 和 $f_v$ 是小型全连接网络（各 2-3 层），将用户和菜谱特征映射到同一 k 维空间后做内积。$\sigma$ 将值映射到 [1, 5]。
+其中 $f_u$ 和 $f_v$ 是小型全连接网络（各 2-3 层），将用户和菜谱特征映射到同一 k 维空间后做内积。 $\sigma$  将值映射到 [1, 5]。
 
 简单版（线性，可解释性强）：
 
@@ -293,7 +293,7 @@ $$\hat{R}_{ui}^{cold\_content} = \frac{\sum_{j \in H(u)} sim_{content}(i, j) \cd
 
 $$\hat{R}_{ui}^{final} = w_1 \hat{R}_{ui}^{UBCF} + w_2 \hat{R}_{ui}^{IBCF} + w_3 \hat{R}_{ui}^{SVD++} + w_4 \hat{R}_{ui}^{content}$$
 
-约束：$\sum_{k=1}^4 w_k = 1, \quad w_k \geq 0$
+约束： $\sum_{k=1}^4 w_k = 1, \quad w_k \geq 0$ 
 
 ### 6.2 动态权重（置信度自适应）
 
