@@ -114,9 +114,11 @@ $$\vec{u}_{taste}^{(i)} = [i_1, i_2, i_3, i_4, i_5]$$
 ### 2.6 最终向量拼接
 
 **用户特征向量**（总维度 d_u）：
+
 $$\mathbf{u}_i = [\text{OneHot}(gender) \;\|\; \text{OneHot}(age\_group) \;\|\; \text{OneHot}(occupation) \;\|\; \vec{u}_{taste} \;\|\; \text{OneHot}(birth\_province) \;\|\; \text{OneHot}(work\_province)]$$
 
 **菜谱特征向量**（总维度 d_v）：
+
 $$\mathbf{v}_j = [\text{OneHot}(cuisine) \;\|\; gi_{norm} \;\|\; t_{norm} \;\|\; cost_{norm} \;\|\; \vec{v}_{taste}^{(j)} \;\|\; \vec{v}_{nature}^{(j)} \;\|\; \vec{v}_{nutrition}^{(j)} \;\|\; \vec{v}_{foodtype\_tfidf}^{(j)} \;\|\; \text{MultiHot}(cookmethod) \;\|\; \text{MultiHot}(avoid\_tags)]$$
 
 ---
