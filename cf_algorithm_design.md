@@ -203,7 +203,7 @@ $$\hat{R}_{ui}^{IBCF} = \frac{\sum_{j \in N_k(i)} sim_{item}(i,j) \cdot R_{uj}}{
 
 $$\mathbf{R} \approx \mathbf{P} \mathbf{Q}^T$$
 
-其中 $\mathbf{P} \in \mathbb{R}^{m \times k}$ 是用户潜在因子矩阵，$\mathbf{Q} \in \mathbb{R}^{n \times k}$ 是菜谱潜在因子矩阵，$k$ 是因子维度。
+其中 $\mathbf{P} \in \mathbb{R}^{m \times k}$ 是用户潜在因子矩阵，  $\mathbf{Q} \in \mathbb{R}^{n \times k}$   是菜谱潜在因子矩阵，$k$ 是因子维度。
 
 单个评分的预测：
 
